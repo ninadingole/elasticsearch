@@ -19,12 +19,20 @@
 package org.elasticsearch.common.util.concurrent;
 
 import org.apache.lucene.util.CloseableThreadLocal;
+import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.io.stream.Writeable;
+import org.elasticsearch.common.logging.DeprecationLogger;
+import org.elasticsearch.common.logging.ESLoggerFactory;
 import org.elasticsearch.common.settings.Setting;
 import org.elasticsearch.common.settings.Setting.Property;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.unit.ByteSizeValue;
+import org.elasticsearch.http.HttpTransportSettings;
+
+import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_WARNING_HEADER_COUNT;
+import static org.elasticsearch.http.HttpTransportSettings.SETTING_HTTP_MAX_WARNING_HEADER_SIZE;
 
 import java.io.Closeable;
 import java.io.IOException;
@@ -33,12 +41,18 @@ import java.util.Collections;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.RunnableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.function.Function;
 import java.util.function.Supplier;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
+import java.nio.charset.StandardCharsets;
+
 
 /**
  * A ThreadContext is a map of string headers and a transient map of keyed objects that are associated with
@@ -74,6 +88,8 @@ public final class ThreadContext implements Closeable, Writeable {
     private static final ThreadContextStruct DEFAULT_CONTEXT = new ThreadContextStruct();
     private final Map<String, String> defaultHeader;
     private final ContextThreadLocal threadLocal;
+    private final int maxWarningHeaderCount;
+    private final long maxWarningHeaderSize;
 
     /**
      * Creates a new ThreadContext instance
@@ -91,6 +107,8 @@ public final class ThreadContext implements Closeable, Writeable {
             this.defaultHeader = Collections.unmodifiableMap(defaultHeader);
         }
         threadLocal = new ContextThreadLocal();
+        this.maxWarningHeaderCount = SETTING_HTTP_MAX_WARNING_HEADER_COUNT.get(settings);
+        this.maxWarningHeaderSize = SETTING_HTTP_MAX_WARNING_HEADER_SIZE.get(settings).getBytes();
     }
 
     @Override
@@ -275,7 +293,7 @@ public final class ThreadContext implements Closeable, Writeable {
      * @param uniqueValue the function that produces de-duplication values
      */
     public void addResponseHeader(final String key, final String value, final Function<String, String> uniqueValue) {
-        threadLocal.set(threadLocal.get().putResponse(key, value, uniqueValue));
+        threadLocal.set(threadLocal.get().putResponse(key, value, uniqueValue, maxWarningHeaderCount, maxWarningHeaderSize));
     }
 
     /**
@@ -352,7 +370,7 @@ public final class ThreadContext implements Closeable, Writeable {
         private final Map<String, Object> transientHeaders;
         private final Map<String, List<String>> responseHeaders;
         private final boolean isSystemContext;
-
+        private long warningHeadersSize; //saving current warning headers' size not to recalculate the size with every new warning header
         private ThreadContextStruct(StreamInput in) throws IOException {
             final int numRequest = in.readVInt();
             Map<String, String> requestHeaders = numRequest == 0 ? Collections.emptyMap() : new HashMap<>(numRequest);
@@ -364,6 +382,7 @@ public final class ThreadContext implements Closeable, Writeable {
             this.responseHeaders = in.readMapOfLists(StreamInput::readString, StreamInput::readString);
             this.transientHeaders = Collections.emptyMap();
             isSystemContext = false; // we never serialize this it's a transient flag
+            this.warningHeadersSize = 0L;
         }
 
         private ThreadContextStruct setSystemContext() {
@@ -380,6 +399,18 @@ public final class ThreadContext implements Closeable, Writeable {
             this.responseHeaders = responseHeaders;
             this.transientHeaders = transientHeaders;
             this.isSystemContext = isSystemContext;
+            this.warningHeadersSize = 0L;
+        }
+
+        private ThreadContextStruct(Map<String, String> requestHeaders,
+                                    Map<String, List<String>> responseHeaders,
+                                    Map<String, Object> transientHeaders, boolean isSystemContext,
+                                    long warningHeadersSize) {
+            this.requestHeaders = requestHeaders;
+            this.responseHeaders = responseHeaders;
+            this.transientHeaders = transientHeaders;
+            this.isSystemContext = isSystemContext;
+            this.warningHeadersSize = warningHeadersSize;
         }
 
         /**
@@ -433,29 +464,57 @@ public final class ThreadContext implements Closeable, Writeable {
             return new ThreadContextStruct(requestHeaders, newResponseHeaders, transientHeaders, isSystemContext);
         }
 
-        private ThreadContextStruct putResponse(final String key, final String value, final Function<String, String> uniqueValue) {
+        private ThreadContextStruct putResponse(final String key, final String value, final Function<String, String> uniqueValue,
+                final int maxWarningHeaderCount, final long maxWarningHeaderSize) {
             assert value != null;
+            long newWarningHeaderSize = warningHeadersSize;
+            //check if we can add another warning header - if max size within limits
+            if (key.equals("Warning") && (maxWarningHeaderSize != -1)) { //if size is NOT unbounded, check its limits
+                if (warningHeadersSize > maxWarningHeaderSize) { // if max size has already been reached before
+                    final String message = "Dropping a warning header, as their total size reached the maximum allowed of [" +
+                        maxWarningHeaderSize + "] bytes set in [" +
+                        HttpTransportSettings.SETTING_HTTP_MAX_WARNING_HEADER_SIZE.getKey() + "]!";
+                    ESLoggerFactory.getLogger(ThreadContext.class).warn(message);
+                    return this;
+                }
+                newWarningHeaderSize += "Warning".getBytes(StandardCharsets.UTF_8).length + value.getBytes(StandardCharsets.UTF_8).length;
+                if (newWarningHeaderSize > maxWarningHeaderSize) {
+                    final String message = "Dropping a warning header, as their total size reached the maximum allowed of [" +
+                        maxWarningHeaderSize + "] bytes set in [" +
+                        HttpTransportSettings.SETTING_HTTP_MAX_WARNING_HEADER_SIZE.getKey() + "]!";
+                    ESLoggerFactory.getLogger(ThreadContext.class).warn(message);
+                    return new ThreadContextStruct(requestHeaders, responseHeaders, transientHeaders, isSystemContext, newWarningHeaderSize);
+                }
+            }
 
             final Map<String, List<String>> newResponseHeaders = new HashMap<>(this.responseHeaders);
             final List<String> existingValues = newResponseHeaders.get(key);
-
             if (existingValues != null) {
                 final Set<String> existingUniqueValues = existingValues.stream().map(uniqueValue).collect(Collectors.toSet());
                 assert existingValues.size() == existingUniqueValues.size();
                 if (existingUniqueValues.contains(uniqueValue.apply(value))) {
                     return this;
                 }
-
                 final List<String> newValues = new ArrayList<>(existingValues);
                 newValues.add(value);
-
                 newResponseHeaders.put(key, Collections.unmodifiableList(newValues));
             } else {
                 newResponseHeaders.put(key, Collections.singletonList(value));
             }
 
-            return new ThreadContextStruct(requestHeaders, newResponseHeaders, transientHeaders, isSystemContext);
+            //check if we can add another warning header - if max count within limits
+            if ((key.equals("Warning")) && (maxWarningHeaderCount != -1)) { //if count is NOT unbounded, check its limits
+                final int warningHeaderCount = newResponseHeaders.containsKey("Warning") ? newResponseHeaders.get("Warning").size() : 0;
+                if (warningHeaderCount > maxWarningHeaderCount) {
+                    final String message = "Dropping a warning header, as their total count reached the maximum allowed of [" +
+                        maxWarningHeaderCount + "] set in [" + HttpTransportSettings.SETTING_HTTP_MAX_WARNING_HEADER_COUNT.getKey() + "]!";
+                    ESLoggerFactory.getLogger(ThreadContext.class).warn(message);
+                    return this;
+                }
+            }
+            return new ThreadContextStruct(requestHeaders, newResponseHeaders, transientHeaders, isSystemContext, newWarningHeaderSize);
         }
+
 
         private ThreadContextStruct putTransient(String key, Object value) {
             Map<String, Object> newTransient = new HashMap<>(this.transientHeaders);
@@ -564,6 +623,36 @@ public final class ThreadContext implements Closeable, Writeable {
                 ctx.restore();
                 whileRunning = true;
                 in.run();
+                if (in instanceof RunnableFuture) {
+                    /*
+                     * The wrapped runnable arose from asynchronous submission of a task to an executor. If an uncaught exception was thrown
+                     * during the execution of this task, we need to inspect this runnable and see if it is an error that should be
+                     * propagated to the uncaught exception handler.
+                     */
+                    try {
+                        ((RunnableFuture) in).get();
+                    } catch (final Exception e) {
+                        /*
+                         * In theory, Future#get can only throw a cancellation exception, an interrupted exception, or an execution
+                         * exception. We want to ignore cancellation exceptions, restore the interrupt status on interrupted exceptions, and
+                         * inspect the cause of an execution. We are going to be extra paranoid here though and completely unwrap the
+                         * exception to ensure that there is not a buried error anywhere. We assume that a general exception has been
+                         * handled by the executed task or the task submitter.
+                         */
+                        assert e instanceof CancellationException
+                                || e instanceof InterruptedException
+                                || e instanceof ExecutionException : e;
+                        final Optional<Error> maybeError = ExceptionsHelper.maybeError(e, ESLoggerFactory.getLogger(ThreadContext.class));
+                        if (maybeError.isPresent()) {
+                            // throw this error where it will propagate to the uncaught exception handler
+                            throw maybeError.get();
+                        }
+                        if (e instanceof InterruptedException) {
+                            // restore the interrupt status
+                            Thread.currentThread().interrupt();
+                        }
+                    }
+                }
                 whileRunning = false;
             } catch (IllegalStateException ex) {
                 if (whileRunning || threadLocal.closed.get() == false) {

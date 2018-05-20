@@ -23,8 +23,11 @@ import org.elasticsearch.action.search.SearchRequest;
 import org.elasticsearch.action.support.IndicesOptions;
 import org.elasticsearch.client.node.NodeClient;
 import org.elasticsearch.common.Strings;
+import org.elasticsearch.common.logging.DeprecationLogger;
+import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.XContentParser;
+import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.query.QueryBuilder;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
@@ -55,6 +58,7 @@ public class RestSearchAction extends BaseRestHandler {
 
     public static final String TYPED_KEYS_PARAM = "typed_keys";
     private static final Set<String> RESPONSE_PARAMS = Collections.singleton(TYPED_KEYS_PARAM);
+    private static final DeprecationLogger DEPRECATION_LOGGER = new DeprecationLogger(Loggers.getLogger(RestSearchAction.class));
 
     public RestSearchAction(Settings settings, RestController controller) {
         super(settings);
@@ -109,7 +113,7 @@ public class RestSearchAction extends BaseRestHandler {
         }
         searchRequest.indices(Strings.splitStringByCommaToArray(request.param("index")));
         if (requestContentParser != null) {
-            searchRequest.source().parseXContent(requestContentParser);
+            searchRequest.source().parseXContent(requestContentParser, true);
         }
 
         final int batchedReduceSize = request.paramAsInt("batched_reduce_size", searchRequest.getBatchedReduceSize());
@@ -122,6 +126,11 @@ public class RestSearchAction extends BaseRestHandler {
             final int maxConcurrentShardRequests = request.paramAsInt("max_concurrent_shard_requests",
                 searchRequest.getMaxConcurrentShardRequests());
             searchRequest.setMaxConcurrentShardRequests(maxConcurrentShardRequests);
+        }
+
+        if (request.hasParam("allow_partial_search_results")) {
+            // only set if we have the parameter passed to override the cluster-level default
+            searchRequest.allowPartialSearchResults(request.paramAsBoolean("allow_partial_search_results", null));
         }
 
         // do not allow 'query_and_fetch' or 'dfs_query_and_fetch' search types
@@ -142,7 +151,16 @@ public class RestSearchAction extends BaseRestHandler {
             searchRequest.scroll(new Scroll(parseTimeValue(scroll, null, "scroll")));
         }
 
-        searchRequest.types(Strings.splitStringByCommaToArray(request.param("type")));
+        final boolean includeTypeName = request.paramAsBoolean("include_type_name", true);
+        String types = request.param("type");
+        if (types != null) {
+            if (includeTypeName == false) {
+                throw new IllegalArgumentException("You may only use the [include_type_name=false] option with the search API with the " +
+                        "[{index}/_search] endpoint.");
+            }
+            DEPRECATION_LOGGER.deprecated("The {index}/{type}/_search endpoint is deprecated, use {index}/_search instead");
+        }
+        searchRequest.types(Strings.splitStringByCommaToArray(types));
         searchRequest.routing(request.param("routing"));
         searchRequest.preference(request.param("preference"));
         searchRequest.indicesOptions(IndicesOptions.fromRequest(request, searchRequest.indicesOptions()));

@@ -241,6 +241,7 @@ import org.elasticsearch.rest.action.admin.cluster.RestRemoteClusterInfoAction;
 import org.elasticsearch.rest.action.admin.cluster.RestRestoreSnapshotAction;
 import org.elasticsearch.rest.action.admin.cluster.RestSnapshotsStatusAction;
 import org.elasticsearch.rest.action.admin.cluster.RestVerifyRepositoryAction;
+import org.elasticsearch.rest.action.admin.indices.RestResizeHandler;
 import org.elasticsearch.rest.action.admin.indices.RestAnalyzeAction;
 import org.elasticsearch.rest.action.admin.indices.RestClearIndicesCacheAction;
 import org.elasticsearch.rest.action.admin.indices.RestCloseIndexAction;
@@ -252,7 +253,6 @@ import org.elasticsearch.rest.action.admin.indices.RestForceMergeAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetAliasesAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetAllAliasesAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetAllMappingsAction;
-import org.elasticsearch.rest.action.admin.indices.RestGetAllSettingsAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetFieldMappingAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetIndexTemplateAction;
 import org.elasticsearch.rest.action.admin.indices.RestGetIndicesAction;
@@ -270,11 +270,10 @@ import org.elasticsearch.rest.action.admin.indices.RestPutMappingAction;
 import org.elasticsearch.rest.action.admin.indices.RestRecoveryAction;
 import org.elasticsearch.rest.action.admin.indices.RestRefreshAction;
 import org.elasticsearch.rest.action.admin.indices.RestRolloverIndexAction;
-import org.elasticsearch.rest.action.admin.indices.RestShrinkIndexAction;
-import org.elasticsearch.rest.action.admin.indices.RestSplitIndexAction;
 import org.elasticsearch.rest.action.admin.indices.RestSyncedFlushAction;
 import org.elasticsearch.rest.action.admin.indices.RestUpdateSettingsAction;
 import org.elasticsearch.rest.action.admin.indices.RestUpgradeAction;
+import org.elasticsearch.rest.action.admin.indices.RestUpgradeStatusAction;
 import org.elasticsearch.rest.action.admin.indices.RestValidateQueryAction;
 import org.elasticsearch.rest.action.cat.AbstractCatAction;
 import org.elasticsearch.rest.action.cat.RestAliasAction;
@@ -312,9 +311,12 @@ import org.elasticsearch.rest.action.search.RestExplainAction;
 import org.elasticsearch.rest.action.search.RestMultiSearchAction;
 import org.elasticsearch.rest.action.search.RestSearchAction;
 import org.elasticsearch.rest.action.search.RestSearchScrollAction;
-import org.elasticsearch.tasks.TaskManager;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.usage.UsageService;
+import org.elasticsearch.persistent.CompletionPersistentTaskAction;
+import org.elasticsearch.persistent.RemovePersistentTaskAction;
+import org.elasticsearch.persistent.StartPersistentTaskAction;
+import org.elasticsearch.persistent.UpdatePersistentTaskStatusAction;
 
 import java.util.ArrayList;
 import java.util.Collections;
@@ -507,6 +509,12 @@ public class ActionModule extends AbstractModule {
 
         actionPlugins.stream().flatMap(p -> p.getActions().stream()).forEach(actions::register);
 
+        // Persistent tasks:
+        actions.register(StartPersistentTaskAction.INSTANCE, StartPersistentTaskAction.TransportAction.class);
+        actions.register(UpdatePersistentTaskStatusAction.INSTANCE, UpdatePersistentTaskStatusAction.TransportAction.class);
+        actions.register(CompletionPersistentTaskAction.INSTANCE, CompletionPersistentTaskAction.TransportAction.class);
+        actions.register(RemovePersistentTaskAction.INSTANCE, RemovePersistentTaskAction.TransportAction.class);
+
         return unmodifiableMap(actions.getRegistry());
     }
 
@@ -549,7 +557,6 @@ public class ActionModule extends AbstractModule {
 
         registerHandler.accept(new RestGetAllAliasesAction(settings, restController));
         registerHandler.accept(new RestGetAllMappingsAction(settings, restController));
-        registerHandler.accept(new RestGetAllSettingsAction(settings, restController, indexScopedSettings, settingsFilter));
         registerHandler.accept(new RestGetIndicesAction(settings, restController, indexScopedSettings, settingsFilter));
         registerHandler.accept(new RestIndicesStatsAction(settings, restController));
         registerHandler.accept(new RestIndicesSegmentsAction(settings, restController));
@@ -559,15 +566,15 @@ public class ActionModule extends AbstractModule {
         registerHandler.accept(new RestIndexPutAliasAction(settings, restController));
         registerHandler.accept(new RestIndicesAliasesAction(settings, restController));
         registerHandler.accept(new RestCreateIndexAction(settings, restController));
-        registerHandler.accept(new RestShrinkIndexAction(settings, restController));
-        registerHandler.accept(new RestSplitIndexAction(settings, restController));
+        registerHandler.accept(new RestResizeHandler.RestShrinkIndexAction(settings, restController));
+        registerHandler.accept(new RestResizeHandler.RestSplitIndexAction(settings, restController));
         registerHandler.accept(new RestRolloverIndexAction(settings, restController));
         registerHandler.accept(new RestDeleteIndexAction(settings, restController));
         registerHandler.accept(new RestCloseIndexAction(settings, restController));
         registerHandler.accept(new RestOpenIndexAction(settings, restController));
 
         registerHandler.accept(new RestUpdateSettingsAction(settings, restController));
-        registerHandler.accept(new RestGetSettingsAction(settings, restController, indexScopedSettings, settingsFilter));
+        registerHandler.accept(new RestGetSettingsAction(settings, restController));
 
         registerHandler.accept(new RestAnalyzeAction(settings, restController));
         registerHandler.accept(new RestGetIndexTemplateAction(settings, restController));
@@ -583,6 +590,7 @@ public class ActionModule extends AbstractModule {
         registerHandler.accept(new RestSyncedFlushAction(settings, restController));
         registerHandler.accept(new RestForceMergeAction(settings, restController));
         registerHandler.accept(new RestUpgradeAction(settings, restController));
+        registerHandler.accept(new RestUpgradeStatusAction(settings, restController));
         registerHandler.accept(new RestClearIndicesCacheAction(settings, restController));
 
         registerHandler.accept(new RestIndexAction(settings, restController));

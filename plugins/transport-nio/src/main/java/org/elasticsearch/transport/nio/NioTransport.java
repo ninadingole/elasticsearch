@@ -21,7 +21,6 @@ package org.elasticsearch.transport.nio;
 
 import org.elasticsearch.ElasticsearchException;
 import org.elasticsearch.action.ActionListener;
-import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.NamedWriteableRegistry;
 import org.elasticsearch.common.network.NetworkService;
 import org.elasticsearch.common.recycler.Recycler;
@@ -31,12 +30,11 @@ import org.elasticsearch.common.util.BigArrays;
 import org.elasticsearch.common.util.PageCacheRecycler;
 import org.elasticsearch.common.util.concurrent.EsExecutors;
 import org.elasticsearch.indices.breaker.CircuitBreakerService;
-import org.elasticsearch.nio.SocketChannelContext;
 import org.elasticsearch.nio.AcceptingSelector;
 import org.elasticsearch.nio.AcceptorEventHandler;
+import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
-import org.elasticsearch.nio.BytesChannelContext;
 import org.elasticsearch.nio.NioGroup;
 import org.elasticsearch.nio.NioSocketChannel;
 import org.elasticsearch.nio.ServerChannelContext;
@@ -53,7 +51,7 @@ import java.nio.ByteBuffer;
 import java.nio.channels.ServerSocketChannel;
 import java.nio.channels.SocketChannel;
 import java.util.concurrent.ConcurrentMap;
-import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.function.Supplier;
 
 import static org.elasticsearch.common.settings.Setting.intSetting;
@@ -179,15 +177,14 @@ public class NioTransport extends TcpTransport {
 
         @Override
         public TcpNioSocketChannel createChannel(SocketSelector selector, SocketChannel channel) throws IOException {
-            TcpNioSocketChannel nioChannel = new TcpNioSocketChannel(profileName, channel, selector);
+            TcpNioSocketChannel nioChannel = new TcpNioSocketChannel(profileName, channel);
             Supplier<InboundChannelBuffer.Page> pageSupplier = () -> {
                 Recycler.V<byte[]> bytes = pageCacheRecycler.bytePage(false);
                 return new InboundChannelBuffer.Page(ByteBuffer.wrap(bytes.v()), bytes::close);
             };
-            SocketChannelContext.ReadConsumer nioReadConsumer = channelBuffer ->
-                consumeNetworkReads(nioChannel, BytesReference.fromByteBuffers(channelBuffer.sliceBuffersTo(channelBuffer.getIndex())));
-            BiConsumer<NioSocketChannel, Exception> exceptionHandler = NioTransport.this::exceptionCaught;
-            BytesChannelContext context = new BytesChannelContext(nioChannel, exceptionHandler, nioReadConsumer,
+            TcpReadWriteHandler readWriteHandler = new TcpReadWriteHandler(nioChannel, NioTransport.this);
+            Consumer<Exception> exceptionHandler = (e) -> exceptionCaught(nioChannel, e);
+            BytesChannelContext context = new BytesChannelContext(nioChannel, selector, exceptionHandler, readWriteHandler,
                 new InboundChannelBuffer(pageSupplier));
             nioChannel.setContext(context);
             return nioChannel;
@@ -195,8 +192,9 @@ public class NioTransport extends TcpTransport {
 
         @Override
         public TcpNioServerSocketChannel createServerChannel(AcceptingSelector selector, ServerSocketChannel channel) throws IOException {
-            TcpNioServerSocketChannel nioChannel = new TcpNioServerSocketChannel(profileName, channel, this, selector);
-            ServerChannelContext context = new ServerChannelContext(nioChannel, NioTransport.this::acceptChannel, (c, e) -> {});
+            TcpNioServerSocketChannel nioChannel = new TcpNioServerSocketChannel(profileName, channel);
+            ServerChannelContext context = new ServerChannelContext(nioChannel, this, selector, NioTransport.this::acceptChannel,
+                (e) -> {});
             nioChannel.setContext(context);
             return nioChannel;
         }

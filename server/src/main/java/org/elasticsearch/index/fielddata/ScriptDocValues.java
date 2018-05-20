@@ -35,10 +35,13 @@ import org.joda.time.MutableDateTime;
 import org.joda.time.ReadableDateTime;
 
 import java.io.IOException;
+import java.security.AccessController;
+import java.security.PrivilegedAction;
 import java.util.AbstractList;
 import java.util.Arrays;
 import java.util.Comparator;
 import java.util.List;
+import java.util.function.Consumer;
 import java.util.function.UnaryOperator;
 
 
@@ -46,7 +49,7 @@ import java.util.function.UnaryOperator;
  * Script level doc values, the assumption is that any implementation will
  * implement a <code>getValue</code> and a <code>getValues</code> that return
  * the relevant type that then can be used in scripts.
- * 
+ *
  * Implementations should not internally re-use objects for the values that they
  * return as a single {@link ScriptDocValues} instance can be reused to return
  * values form multiple documents.
@@ -91,22 +94,19 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
     }
 
     public static final class Longs extends ScriptDocValues<Long> {
-        protected static final DeprecationLogger deprecationLogger = new DeprecationLogger(ESLoggerFactory.getLogger(Longs.class));
-
         private final SortedNumericDocValues in;
         private long[] values = new long[0];
         private int count;
-        private Dates dates;
-        private int docId = -1;
 
+        /**
+         * Standard constructor.
+         */
         public Longs(SortedNumericDocValues in) {
             this.in = in;
-
         }
 
         @Override
         public void setNextDocId(int docId) throws IOException {
-            this.docId = docId;
             if (in.advanceExact(docId)) {
                 resize(in.docValueCount());
                 for (int i = 0; i < count; i++) {
@@ -114,9 +114,6 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
                 }
             } else {
                 resize(0);
-            }
-            if (dates != null) {
-                dates.setNextDocId(docId);
             }
         }
 
@@ -129,35 +126,11 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
             values = ArrayUtil.grow(values, count);
         }
 
-        public SortedNumericDocValues getInternalValues() {
-            return this.in;
-        }
-
         public long getValue() {
             if (count == 0) {
                 return 0L;
             }
             return values[0];
-        }
-
-        @Deprecated
-        public ReadableDateTime getDate() throws IOException {
-            deprecationLogger.deprecated("getDate on numeric fields is deprecated. Use a date field to get dates.");
-            if (dates == null) {
-                dates = new Dates(in);
-                dates.setNextDocId(docId);
-            }
-            return dates.getValue();
-        }
-
-        @Deprecated
-        public List<ReadableDateTime> getDates() throws IOException {
-            deprecationLogger.deprecated("getDates on numeric fields is deprecated. Use a date field to get dates.");
-            if (dates == null) {
-                dates = new Dates(in);
-                dates.setNextDocId(docId);
-            }
-            return dates;
         }
 
         @Override
@@ -184,6 +157,9 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
         private MutableDateTime[] dates;
         private int count;
 
+        /**
+         * Standard constructor.
+         */
         public Dates(SortedNumericDocValues in) {
             this.in = in;
         }
@@ -197,24 +173,6 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
                 return EPOCH;
             }
             return get(0);
-        }
-
-        /**
-         * Fetch the first value. Added for backwards compatibility with 5.x when date fields were {@link Longs}.
-         */
-        @Deprecated
-        public ReadableDateTime getDate() {
-            deprecationLogger.deprecated("getDate is no longer necessary on date fields as the value is now a date.");
-            return getValue();
-        }
-
-        /**
-         * Fetch all the values. Added for backwards compatibility with 5.x when date fields were {@link Longs}.
-         */
-        @Deprecated
-        public List<ReadableDateTime> getDates() {
-            deprecationLogger.deprecated("getDates is no longer necessary on date fields as the values are now dates.");
-            return this;
         }
 
         @Override
@@ -563,23 +521,9 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
             return values[index].get().utf8ToString();
         }
 
-        public BytesRef getBytesValue() {
-            if (size() > 0) {
-                return values[0].get();
-            } else {
-                return null;
-            }
-        }
-
         public String getValue() {
-            BytesRef value = getBytesValue();
-            if (value == null) {
-                return null;
-            } else {
-                return value.utf8ToString();
-            }
+            return count == 0 ? null : get(0);
         }
-
     }
 
     public static final class BytesRefs extends BinaryScriptDocValues<BytesRef> {
@@ -590,14 +534,16 @@ public abstract class ScriptDocValues<T> extends AbstractList<T> {
 
         @Override
         public BytesRef get(int index) {
-            return values[index].get();
+            /**
+             * We need to make a copy here because {@link BinaryScriptDocValues} might reuse the
+             * returned value and the same instance might be used to
+             * return values from multiple documents.
+             **/
+            return values[index].toBytesRef();
         }
 
         public BytesRef getValue() {
-            if (count == 0) {
-                return new BytesRef();
-            }
-            return values[0].get();
+            return count == 0 ? new BytesRef() : get(0);
         }
 
     }

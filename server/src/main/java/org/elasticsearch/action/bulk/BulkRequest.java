@@ -36,10 +36,9 @@ import org.elasticsearch.common.bytes.BytesArray;
 import org.elasticsearch.common.bytes.BytesReference;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
-import org.elasticsearch.common.logging.DeprecationLogger;
-import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.lucene.uid.Versions;
 import org.elasticsearch.common.unit.TimeValue;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
 import org.elasticsearch.common.xcontent.XContent;
 import org.elasticsearch.common.xcontent.XContentParser;
@@ -48,6 +47,7 @@ import org.elasticsearch.index.VersionType;
 import org.elasticsearch.search.fetch.subphase.FetchSourceContext;
 
 import java.io.IOException;
+import java.io.InputStream;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -64,8 +64,6 @@ import static org.elasticsearch.action.ValidateActions.addValidationError;
  * @see org.elasticsearch.client.Client#bulk(BulkRequest)
  */
 public class BulkRequest extends ActionRequest implements CompositeIndicesRequest, WriteRequest<BulkRequest> {
-    private static final DeprecationLogger DEPRECATION_LOGGER =
-        new DeprecationLogger(Loggers.getLogger(BulkRequest.class));
 
     private static final int REQUEST_OVERHEAD = 50;
 
@@ -73,13 +71,11 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
     private static final ParseField TYPE = new ParseField("_type");
     private static final ParseField ID = new ParseField("_id");
     private static final ParseField ROUTING = new ParseField("routing");
-    private static final ParseField PARENT = new ParseField("parent");
     private static final ParseField OP_TYPE = new ParseField("op_type");
     private static final ParseField VERSION = new ParseField("version");
     private static final ParseField VERSION_TYPE = new ParseField("version_type");
     private static final ParseField RETRY_ON_CONFLICT = new ParseField("retry_on_conflict");
     private static final ParseField PIPELINE = new ParseField("pipeline");
-    private static final ParseField FIELDS = new ParseField("fields");
     private static final ParseField SOURCE = new ParseField("_source");
 
     /**
@@ -276,7 +272,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
      */
     public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType,
                            XContentType xContentType) throws IOException {
-        return add(data, defaultIndex, defaultType, null, null, null, null, null, true, xContentType);
+        return add(data, defaultIndex, defaultType, null, null, null, null, true, xContentType);
     }
 
     /**
@@ -284,12 +280,13 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
      */
     public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, boolean allowExplicitIndex,
                            XContentType xContentType) throws IOException {
-        return add(data, defaultIndex, defaultType, null, null, null, null, null, allowExplicitIndex, xContentType);
+        return add(data, defaultIndex, defaultType, null, null, null, null, allowExplicitIndex, xContentType);
     }
 
-    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType, @Nullable String
-        defaultRouting, @Nullable String[] defaultFields, @Nullable FetchSourceContext defaultFetchSourceContext, @Nullable String
-        defaultPipeline, @Nullable Object payload, boolean allowExplicitIndex, XContentType xContentType) throws IOException {
+    public BulkRequest add(BytesReference data, @Nullable String defaultIndex, @Nullable String defaultType,
+                           @Nullable String defaultRouting, @Nullable FetchSourceContext defaultFetchSourceContext,
+                           @Nullable String defaultPipeline, @Nullable Object payload, boolean allowExplicitIndex,
+                           XContentType xContentType) throws IOException {
         XContent xContent = xContentType.xContent();
         int line = 0;
         int from = 0;
@@ -304,7 +301,9 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
 
             // now parse the action
             // EMPTY is safe here because we never call namedObject
-            try (XContentParser parser = xContent.createParser(NamedXContentRegistry.EMPTY, data.slice(from, nextMarker - from))) {
+            try (InputStream stream = data.slice(from, nextMarker - from).streamInput();
+                 XContentParser parser = xContent
+                     .createParser(NamedXContentRegistry.EMPTY, LoggingDeprecationHandler.INSTANCE, stream)) {
                 // move pointers
                 from = nextMarker + 1;
 
@@ -329,9 +328,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
                 String type = defaultType;
                 String id = null;
                 String routing = defaultRouting;
-                String parent = null;
                 FetchSourceContext fetchSourceContext = defaultFetchSourceContext;
-                String[] fields = defaultFields;
                 String opType = null;
                 long version = Versions.MATCH_ANY;
                 VersionType versionType = VersionType.INTERNAL;
@@ -348,45 +345,36 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
                         if (token == XContentParser.Token.FIELD_NAME) {
                             currentFieldName = parser.currentName();
                         } else if (token.isValue()) {
-                            if (INDEX.match(currentFieldName)){
+                            if (INDEX.match(currentFieldName, parser.getDeprecationHandler())){
                                 if (!allowExplicitIndex) {
                                     throw new IllegalArgumentException("explicit index in bulk is not allowed");
                                 }
                                 index = parser.text();
-                            } else if (TYPE.match(currentFieldName)) {
+                            } else if (TYPE.match(currentFieldName, parser.getDeprecationHandler())) {
                                 type = parser.text();
-                            } else if (ID.match(currentFieldName)) {
+                            } else if (ID.match(currentFieldName, parser.getDeprecationHandler())) {
                                 id = parser.text();
-                            } else if (ROUTING.match(currentFieldName)) {
+                            } else if (ROUTING.match(currentFieldName, parser.getDeprecationHandler())) {
                                 routing = parser.text();
-                            } else if (PARENT.match(currentFieldName)) {
-                                parent = parser.text();
-                            } else if (OP_TYPE.match(currentFieldName)) {
+                            } else if (OP_TYPE.match(currentFieldName, parser.getDeprecationHandler())) {
                                 opType = parser.text();
-                            } else if (VERSION.match(currentFieldName)) {
+                            } else if (VERSION.match(currentFieldName, parser.getDeprecationHandler())) {
                                 version = parser.longValue();
-                            } else if (VERSION_TYPE.match(currentFieldName)) {
+                            } else if (VERSION_TYPE.match(currentFieldName, parser.getDeprecationHandler())) {
                                 versionType = VersionType.fromString(parser.text());
-                            } else if (RETRY_ON_CONFLICT.match(currentFieldName)) {
+                            } else if (RETRY_ON_CONFLICT.match(currentFieldName, parser.getDeprecationHandler())) {
                                 retryOnConflict = parser.intValue();
-                            } else if (PIPELINE.match(currentFieldName)) {
+                            } else if (PIPELINE.match(currentFieldName, parser.getDeprecationHandler())) {
                                 pipeline = parser.text();
-                            } else if (FIELDS.match(currentFieldName)) {
-                                throw new IllegalArgumentException("Action/metadata line [" + line + "] contains a simple value for parameter [fields] while a list is expected");
-                            } else if (SOURCE.match(currentFieldName)) {
+                            } else if (SOURCE.match(currentFieldName, parser.getDeprecationHandler())) {
                                 fetchSourceContext = FetchSourceContext.fromXContent(parser);
                             } else {
                                 throw new IllegalArgumentException("Action/metadata line [" + line + "] contains an unknown parameter [" + currentFieldName + "]");
                             }
                         } else if (token == XContentParser.Token.START_ARRAY) {
-                            if (FIELDS.match(currentFieldName)) {
-                                DEPRECATION_LOGGER.deprecated("Deprecated field [fields] used, expected [_source] instead");
-                                List<Object> values = parser.list();
-                                fields = values.toArray(new String[values.size()]);
-                            } else {
-                                throw new IllegalArgumentException("Malformed action/metadata line [" + line + "], expected a simple value for field [" + currentFieldName + "] but found [" + token + "]");
-                            }
-                        } else if (token == XContentParser.Token.START_OBJECT && SOURCE.match(currentFieldName)) {
+                            throw new IllegalArgumentException("Malformed action/metadata line [" + line +
+                                "], expected a simple value for field [" + currentFieldName + "] but found [" + token + "]");
+                        } else if (token == XContentParser.Token.START_OBJECT && SOURCE.match(currentFieldName, parser.getDeprecationHandler())) {
                             fetchSourceContext = FetchSourceContext.fromXContent(parser);
                         } else if (token != XContentParser.Token.VALUE_NULL) {
                             throw new IllegalArgumentException("Malformed action/metadata line [" + line + "], expected a simple value for field [" + currentFieldName + "] but found [" + token + "]");
@@ -398,7 +386,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
                 }
 
                 if ("delete".equals(action)) {
-                    add(new DeleteRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType), payload);
+                    add(new DeleteRequest(index, type, id).routing(routing).version(version).versionType(versionType), payload);
                 } else {
                     nextMarker = findNextMarker(marker, from, data, length);
                     if (nextMarker == -1) {
@@ -410,35 +398,31 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
                     // of index request.
                     if ("index".equals(action)) {
                         if (opType == null) {
-                            internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                            internalAdd(new IndexRequest(index, type, id).routing(routing).version(version).versionType(versionType)
                                     .setPipeline(pipeline)
                                     .source(sliceTrimmingCarriageReturn(data, from, nextMarker,xContentType), xContentType), payload);
                         } else {
-                            internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                            internalAdd(new IndexRequest(index, type, id).routing(routing).version(version).versionType(versionType)
                                     .create("create".equals(opType)).setPipeline(pipeline)
                                     .source(sliceTrimmingCarriageReturn(data, from, nextMarker, xContentType), xContentType), payload);
                         }
                     } else if ("create".equals(action)) {
-                        internalAdd(new IndexRequest(index, type, id).routing(routing).parent(parent).version(version).versionType(versionType)
+                        internalAdd(new IndexRequest(index, type, id).routing(routing).version(version).versionType(versionType)
                                 .create(true).setPipeline(pipeline)
                                 .source(sliceTrimmingCarriageReturn(data, from, nextMarker, xContentType), xContentType), payload);
                     } else if ("update".equals(action)) {
-                        UpdateRequest updateRequest = new UpdateRequest(index, type, id).routing(routing).parent(parent).retryOnConflict(retryOnConflict)
+                        UpdateRequest updateRequest = new UpdateRequest(index, type, id).routing(routing).retryOnConflict(retryOnConflict)
                                 .version(version).versionType(versionType)
-                                .routing(routing)
-                                .parent(parent);
+                                .routing(routing);
                         // EMPTY is safe here because we never call namedObject
-                        try (XContentParser sliceParser = xContent.createParser(NamedXContentRegistry.EMPTY,
-                                                        sliceTrimmingCarriageReturn(data, from, nextMarker, xContentType))) {
+                        try (InputStream dataStream = sliceTrimmingCarriageReturn(data, from, nextMarker, xContentType).streamInput();
+                             XContentParser sliceParser = xContent.createParser(NamedXContentRegistry.EMPTY,
+                                 LoggingDeprecationHandler.INSTANCE, dataStream)) {
                             updateRequest.fromXContent(sliceParser);
                         }
                         if (fetchSourceContext != null) {
                             updateRequest.fetchSource(fetchSourceContext);
                         }
-                        if (fields != null) {
-                            updateRequest.fields(fields);
-                        }
-
                         IndexRequest upsertRequest = updateRequest.upsertRequest();
                         if (upsertRequest != null) {
                             upsertRequest.version(version);
@@ -509,7 +493,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
     }
 
     /**
-     * A timeout to wait if the index operation can't be performed immediately. Defaults to <tt>1m</tt>.
+     * A timeout to wait if the index operation can't be performed immediately. Defaults to {@code 1m}.
      */
     public final BulkRequest timeout(TimeValue timeout) {
         this.timeout = timeout;
@@ -517,7 +501,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
     }
 
     /**
-     * A timeout to wait if the index operation can't be performed immediately. Defaults to <tt>1m</tt>.
+     * A timeout to wait if the index operation can't be performed immediately. Defaults to {@code 1m}.
      */
     public final BulkRequest timeout(String timeout) {
         return timeout(TimeValue.parseTimeValue(timeout, null, getClass().getSimpleName() + ".timeout"));
@@ -588,7 +572,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
             requests.add(DocWriteRequest.readDocumentRequest(in));
         }
         refreshPolicy = RefreshPolicy.readFrom(in);
-        timeout = new TimeValue(in);
+        timeout = in.readTimeValue();
     }
 
     @Override
@@ -600,7 +584,7 @@ public class BulkRequest extends ActionRequest implements CompositeIndicesReques
             DocWriteRequest.writeDocumentRequest(out, request);
         }
         refreshPolicy.writeTo(out);
-        timeout.writeTo(out);
+        out.writeTimeValue(timeout);
     }
 
     @Override

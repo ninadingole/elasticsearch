@@ -28,7 +28,7 @@ import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.rest.BaseRestHandler;
 import org.elasticsearch.rest.RestController;
 import org.elasticsearch.rest.RestRequest;
-import org.elasticsearch.rest.action.AcknowledgedRestListener;
+import org.elasticsearch.rest.action.RestToXContentListener;
 
 import java.io.IOException;
 import java.util.HashMap;
@@ -57,23 +57,9 @@ public class RestUpdateSettingsAction extends BaseRestHandler {
         updateSettingsRequest.setPreserveExisting(request.paramAsBoolean("preserve_existing", updateSettingsRequest.isPreserveExisting()));
         updateSettingsRequest.masterNodeTimeout(request.paramAsTime("master_timeout", updateSettingsRequest.masterNodeTimeout()));
         updateSettingsRequest.indicesOptions(IndicesOptions.fromRequest(request, updateSettingsRequest.indicesOptions()));
+        updateSettingsRequest.fromXContent(request.contentParser());
 
-        Map<String, Object> settings = new HashMap<>();
-        try (XContentParser parser = request.contentParser()) {
-            Map<String, Object> bodySettings = parser.map();
-            Object innerBodySettings = bodySettings.get("settings");
-            // clean up in case the body is wrapped with "settings" : { ... }
-            if (innerBodySettings instanceof Map) {
-                @SuppressWarnings("unchecked")
-                Map<String, Object> innerBodySettingsMap = (Map<String, Object>) innerBodySettings;
-                settings.putAll(innerBodySettingsMap);
-            } else {
-                settings.putAll(bodySettings);
-            }
-        }
-        updateSettingsRequest.settings(settings);
-
-        return channel -> client.admin().indices().updateSettings(updateSettingsRequest, new AcknowledgedRestListener<>(channel));
+        return channel -> client.admin().indices().updateSettings(updateSettingsRequest, new RestToXContentListener<>(channel));
     }
 
     @Override

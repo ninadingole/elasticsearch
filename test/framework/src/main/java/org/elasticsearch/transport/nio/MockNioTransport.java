@@ -32,13 +32,13 @@ import org.elasticsearch.indices.breaker.CircuitBreakerService;
 import org.elasticsearch.nio.AcceptingSelector;
 import org.elasticsearch.nio.AcceptorEventHandler;
 import org.elasticsearch.nio.BytesChannelContext;
+import org.elasticsearch.nio.BytesWriteHandler;
 import org.elasticsearch.nio.ChannelFactory;
 import org.elasticsearch.nio.InboundChannelBuffer;
 import org.elasticsearch.nio.NioGroup;
 import org.elasticsearch.nio.NioServerSocketChannel;
 import org.elasticsearch.nio.NioSocketChannel;
 import org.elasticsearch.nio.ServerChannelContext;
-import org.elasticsearch.nio.SocketChannelContext;
 import org.elasticsearch.nio.SocketSelector;
 import org.elasticsearch.threadpool.ThreadPool;
 import org.elasticsearch.transport.TcpChannel;
@@ -162,10 +162,9 @@ public class MockNioTransport extends TcpTransport {
                 Recycler.V<byte[]> bytes = pageCacheRecycler.bytePage(false);
                 return new InboundChannelBuffer.Page(ByteBuffer.wrap(bytes.v()), bytes::close);
             };
-            SocketChannelContext.ReadConsumer nioReadConsumer = channelBuffer ->
-                consumeNetworkReads(nioChannel, BytesReference.fromByteBuffers(channelBuffer.sliceBuffersTo(channelBuffer.getIndex())));
-            BytesChannelContext context = new BytesChannelContext(nioChannel, MockNioTransport.this::exceptionCaught, nioReadConsumer,
-                new InboundChannelBuffer(pageSupplier));
+            MockTcpReadWriteHandler readWriteHandler = new MockTcpReadWriteHandler(nioChannel, MockNioTransport.this);
+            BytesChannelContext context = new BytesChannelContext(nioChannel, selector, (e) -> exceptionCaught(nioChannel, e),
+                readWriteHandler, new InboundChannelBuffer(pageSupplier));
             nioChannel.setContext(context);
             return nioChannel;
         }
@@ -173,9 +172,27 @@ public class MockNioTransport extends TcpTransport {
         @Override
         public MockServerChannel createServerChannel(AcceptingSelector selector, ServerSocketChannel channel) throws IOException {
             MockServerChannel nioServerChannel = new MockServerChannel(profileName, channel, this, selector);
-            ServerChannelContext context = new ServerChannelContext(nioServerChannel, MockNioTransport.this::acceptChannel, (c, e) -> {});
+            ServerChannelContext context = new ServerChannelContext(nioServerChannel, this, selector, MockNioTransport.this::acceptChannel,
+                (e) -> {});
             nioServerChannel.setContext(context);
             return nioServerChannel;
+        }
+    }
+
+    private static class MockTcpReadWriteHandler extends BytesWriteHandler {
+
+        private final MockSocketChannel channel;
+        private final TcpTransport transport;
+
+        private MockTcpReadWriteHandler(MockSocketChannel channel, TcpTransport transport) {
+            this.channel = channel;
+            this.transport = transport;
+        }
+
+        @Override
+        public int consumeReads(InboundChannelBuffer channelBuffer) throws IOException {
+            BytesReference bytesReference = BytesReference.fromByteBuffers(channelBuffer.sliceBuffersTo(channelBuffer.getIndex()));
+            return transport.consumeNetworkReads(channel, bytesReference);
         }
     }
 
@@ -185,13 +202,13 @@ public class MockNioTransport extends TcpTransport {
 
         MockServerChannel(String profile, ServerSocketChannel channel, ChannelFactory<?, ?> channelFactory, AcceptingSelector selector)
             throws IOException {
-            super(channel, channelFactory, selector);
+            super(channel);
             this.profile = profile;
         }
 
         @Override
         public void close() {
-            getSelector().queueChannelClose(this);
+            getContext().closeChannel();
         }
 
         @Override
@@ -226,7 +243,7 @@ public class MockNioTransport extends TcpTransport {
 
         private MockSocketChannel(String profile, java.nio.channels.SocketChannel socketChannel, SocketSelector selector)
             throws IOException {
-            super(socketChannel, selector);
+            super(socketChannel);
             this.profile = profile;
         }
 

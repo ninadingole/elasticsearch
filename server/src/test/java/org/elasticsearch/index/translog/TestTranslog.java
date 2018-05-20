@@ -83,31 +83,35 @@ public class TestTranslog {
             int corruptions = RandomNumbers.randomIntBetween(random, 5, 20);
             for (int i = 0; i < corruptions; i++) {
                 Path fileToCorrupt = RandomPicks.randomFrom(random, candidates);
-                try (FileChannel raf = FileChannel.open(fileToCorrupt, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
-                    // read
-                    raf.position(RandomNumbers.randomLongBetween(random, 0, raf.size() - 1));
-                    long filePointer = raf.position();
-                    ByteBuffer bb = ByteBuffer.wrap(new byte[1]);
-                    raf.read(bb);
-                    bb.flip();
-
-                    // corrupt
-                    byte oldValue = bb.get(0);
-                    byte newValue = (byte) (oldValue + 1);
-                    bb.put(0, newValue);
-
-                    // rewrite
-                    raf.position(filePointer);
-                    raf.write(bb);
-                    logger.info("--> corrupting file {} --  flipping at position {} from {} to {} file: {}",
-                        fileToCorrupt, filePointer, Integer.toHexString(oldValue),
-                        Integer.toHexString(newValue), fileToCorrupt);
-                }
+                corruptFile(logger, random, fileToCorrupt);
                 corruptedFiles.add(fileToCorrupt);
             }
         }
         assertThat("no translog file corrupted", corruptedFiles, not(empty()));
         return corruptedFiles;
+    }
+
+    static void corruptFile(Logger logger, Random random, Path fileToCorrupt) throws IOException {
+        try (FileChannel raf = FileChannel.open(fileToCorrupt, StandardOpenOption.READ, StandardOpenOption.WRITE)) {
+            // read
+            raf.position(RandomNumbers.randomLongBetween(random, 0, raf.size() - 1));
+            long filePointer = raf.position();
+            ByteBuffer bb = ByteBuffer.wrap(new byte[1]);
+            raf.read(bb);
+            bb.flip();
+
+            // corrupt
+            byte oldValue = bb.get(0);
+            byte newValue = (byte) (oldValue + 1);
+            bb.put(0, newValue);
+
+            // rewrite
+            raf.position(filePointer);
+            raf.write(bb);
+            logger.info("--> corrupting file {} --  flipping at position {} from {} to {} file: {}",
+                fileToCorrupt, filePointer, Integer.toHexString(oldValue),
+                Integer.toHexString(newValue), fileToCorrupt);
+        }
     }
 
     /**
@@ -116,9 +120,17 @@ public class TestTranslog {
     private static long minTranslogGenUsedInRecovery(Path translogPath) throws IOException {
         try (NIOFSDirectory directory = new NIOFSDirectory(translogPath.getParent().resolve("index"))) {
             List<IndexCommit> commits = DirectoryReader.listCommits(directory);
-            long globalCheckpoint = Translog.readGlobalCheckpoint(translogPath);
+            final String translogUUID = commits.get(commits.size() - 1).getUserData().get(Translog.TRANSLOG_UUID_KEY);
+            long globalCheckpoint = Translog.readGlobalCheckpoint(translogPath, translogUUID);
             IndexCommit recoveringCommit = CombinedDeletionPolicy.findSafeCommitPoint(commits, globalCheckpoint);
             return Long.parseLong(recoveringCommit.getUserData().get(Translog.TRANSLOG_GENERATION_KEY));
         }
+    }
+
+    /**
+     * Returns the primary term associated with the current translog writer of the given translog.
+     */
+    public static long getCurrentTerm(Translog translog) {
+        return translog.getCurrent().getPrimaryTerm();
     }
 }

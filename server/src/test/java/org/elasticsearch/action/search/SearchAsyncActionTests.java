@@ -59,6 +59,7 @@ public class SearchAsyncActionTests extends ESTestCase {
 
     public void testSkipSearchShards() throws InterruptedException {
         SearchRequest request = new SearchRequest();
+        request.allowPartialSearchResults(true);
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<TestSearchResponse> response = new AtomicReference<>();
         ActionListener<SearchResponse> responseListener = new ActionListener<SearchResponse>() {
@@ -104,6 +105,7 @@ public class SearchAsyncActionTests extends ESTestCase {
                     assert cluster == null : "cluster was not null: " + cluster;
                     return lookup.get(node); },
                 aliasFilters,
+                Collections.emptyMap(),
                 Collections.emptyMap(),
                 null,
                 request,
@@ -154,6 +156,7 @@ public class SearchAsyncActionTests extends ESTestCase {
 
     public void testLimitConcurrentShardRequests() throws InterruptedException {
         SearchRequest request = new SearchRequest();
+        request.allowPartialSearchResults(true);
         int numConcurrent = randomIntBetween(1, 5);
         request.setMaxConcurrentShardRequests(numConcurrent);
         CountDownLatch latch = new CountDownLatch(1);
@@ -195,6 +198,7 @@ public class SearchAsyncActionTests extends ESTestCase {
                     assert cluster == null : "cluster was not null: " + cluster;
                     return lookup.get(node); },
                 aliasFilters,
+                Collections.emptyMap(),
                 Collections.emptyMap(),
                 null,
                 request,
@@ -253,6 +257,7 @@ public class SearchAsyncActionTests extends ESTestCase {
 
     public void testFanOutAndCollect() throws InterruptedException {
         SearchRequest request = new SearchRequest();
+        request.allowPartialSearchResults(true);
         request.setMaxConcurrentShardRequests(randomIntBetween(1, 100));
         CountDownLatch latch = new CountDownLatch(1);
         AtomicReference<TestSearchResponse> response = new AtomicReference<>();
@@ -299,6 +304,7 @@ public class SearchAsyncActionTests extends ESTestCase {
                             assert cluster == null : "cluster was not null: " + cluster;
                             return lookup.get(node); },
                         aliasFilters,
+                        Collections.emptyMap(),
                         Collections.emptyMap(),
                         executor,
                         request,

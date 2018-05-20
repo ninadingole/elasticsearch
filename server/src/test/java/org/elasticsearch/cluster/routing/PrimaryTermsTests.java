@@ -83,7 +83,7 @@ public class PrimaryTermsTests extends ESAllocationTestCase {
     }
 
     /**
-     * puts primary shard routings into initializing state
+     * puts primary shard indexRoutings into initializing state
      */
     private void initPrimaries() {
         logger.info("adding {} nodes and performing rerouting", this.numberOfReplicas + 1);
@@ -144,7 +144,7 @@ public class PrimaryTermsTests extends ESAllocationTestCase {
         logger.info("failing primary shards {} for index [{}]", shardIdsToFail, index);
         List<FailedShard> failedShards = new ArrayList<>();
         for (int shard : shardIdsToFail) {
-            failedShards.add(new FailedShard(indexShardRoutingTable.shard(shard).primaryShard(), "test", null));
+            failedShards.add(new FailedShard(indexShardRoutingTable.shard(shard).primaryShard(), "test", null, randomBoolean()));
             incrementPrimaryTerm(index, shard); // the primary failure should increment the primary term;
         }
         applyRerouteResult(allocationService.applyFailedShards(this.clusterState, failedShards,Collections.emptyList()));

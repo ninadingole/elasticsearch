@@ -202,7 +202,7 @@ public abstract class TransportReplicationAction<
 
     /**
      * Synchronously execute the specified replica operation. This is done under a permit from
-     * {@link IndexShard#acquireReplicaOperationPermit(long, long, ActionListener, String)}.
+     * {@link IndexShard#acquireReplicaOperationPermit(long, long, ActionListener, String, Object)}.
      *
      * @param shardRequest the request to the replica shard
      * @param replica      the replica shard to perform the operation on
@@ -265,9 +265,7 @@ public abstract class TransportReplicationAction<
                         channel.sendResponse(e);
                     } catch (Exception inner) {
                         inner.addSuppressed(e);
-                        logger.warn(
-                            (org.apache.logging.log4j.util.Supplier<?>)
-                                () -> new ParameterizedMessage("Failed to send response for {}", actionName), inner);
+                        logger.warn(() -> new ParameterizedMessage("Failed to send response for {}", actionName), inner);
                     }
                 }
             });
@@ -317,7 +315,7 @@ public abstract class TransportReplicationAction<
 
         @Override
         protected void doRun() throws Exception {
-            acquirePrimaryShardReference(request.shardId(), targetAllocationID, primaryTerm, this);
+            acquirePrimaryShardReference(request.shardId(), targetAllocationID, primaryTerm, this, request);
         }
 
         @Override
@@ -579,7 +577,6 @@ public abstract class TransportReplicationAction<
         public void onFailure(Exception e) {
             if (e instanceof RetryOnReplicaException) {
                 logger.trace(
-                    (org.apache.logging.log4j.util.Supplier<?>)
                         () -> new ParameterizedMessage(
                             "Retrying operation on replica, action [{}], request [{}]",
                             transportReplicaAction,
@@ -621,12 +618,8 @@ public abstract class TransportReplicationAction<
                 channel.sendResponse(e);
             } catch (IOException responseException) {
                 responseException.addSuppressed(e);
-                logger.warn(
-                    (org.apache.logging.log4j.util.Supplier<?>)
-                        () -> new ParameterizedMessage(
-                            "failed to send error message back to client for action [{}]",
-                            transportReplicaAction),
-                    responseException);
+                logger.warn(() -> new ParameterizedMessage(
+                            "failed to send error message back to client for action [{}]", transportReplicaAction), responseException);
             }
         }
 
@@ -638,7 +631,7 @@ public abstract class TransportReplicationAction<
                 throw new ShardNotFoundException(this.replica.shardId(), "expected aID [{}] but found [{}]", targetAllocationID,
                     actualAllocationId);
             }
-            replica.acquireReplicaOperationPermit(primaryTerm, globalCheckpoint, this, executor);
+            replica.acquireReplicaOperationPermit(primaryTerm, globalCheckpoint, this, executor, request);
         }
 
         /**
@@ -854,12 +847,9 @@ public abstract class TransportReplicationAction<
                         final Throwable cause = exp.unwrapCause();
                         if (cause instanceof ConnectTransportException || cause instanceof NodeClosedException ||
                             (isPrimaryAction && retryPrimaryException(cause))) {
-                            logger.trace(
-                                (org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage(
+                            logger.trace(() -> new ParameterizedMessage(
                                     "received an error from node [{}] for request [{}], scheduling a retry",
-                                    node.getId(),
-                                    requestToPerform),
-                                exp);
+                                    node.getId(), requestToPerform), exp);
                             retry(exp);
                         } else {
                             finishAsFailed(exp);
@@ -903,9 +893,7 @@ public abstract class TransportReplicationAction<
         void finishAsFailed(Exception failure) {
             if (finished.compareAndSet(false, true)) {
                 setPhase(task, "failed");
-                logger.trace(
-                    (org.apache.logging.log4j.util.Supplier<?>)
-                        () -> new ParameterizedMessage("operation failed. action [{}], request [{}]", actionName, request), failure);
+                logger.trace(() -> new ParameterizedMessage("operation failed. action [{}], request [{}]", actionName, request), failure);
                 listener.onFailure(failure);
             } else {
                 assert false : "finishAsFailed called but operation is already finished";
@@ -913,13 +901,9 @@ public abstract class TransportReplicationAction<
         }
 
         void finishWithUnexpectedFailure(Exception failure) {
-            logger.warn(
-                (org.apache.logging.log4j.util.Supplier<?>)
-                    () -> new ParameterizedMessage(
+            logger.warn(() -> new ParameterizedMessage(
                         "unexpected error during the primary phase for action [{}], request [{}]",
-                        actionName,
-                        request),
-                failure);
+                        actionName, request), failure);
             if (finished.compareAndSet(false, true)) {
                 setPhase(task, "failed");
                 listener.onFailure(failure);
@@ -950,7 +934,7 @@ public abstract class TransportReplicationAction<
      * and replication of the operation to all replica shards is completed / failed (see {@link ReplicationOperation}).
      */
     private void acquirePrimaryShardReference(ShardId shardId, String allocationId, long primaryTerm,
-                                              ActionListener<PrimaryShardReference> onReferenceAcquired) {
+                                              ActionListener<PrimaryShardReference> onReferenceAcquired, Object debugInfo) {
         IndexShard indexShard = getIndexShard(shardId);
         // we may end up here if the cluster state used to route the primary is so stale that the underlying
         // index shard was replaced with a replica. For example - in a two node cluster, if the primary fails
@@ -981,7 +965,7 @@ public abstract class TransportReplicationAction<
             }
         };
 
-        indexShard.acquirePrimaryOperationPermit(onAcquired, executor);
+        indexShard.acquirePrimaryOperationPermit(onAcquired, executor, debugInfo);
     }
 
     class ShardReference implements Releasable {
@@ -1017,7 +1001,7 @@ public abstract class TransportReplicationAction<
         }
 
         public boolean isRelocated() {
-            return indexShard.state() == IndexShardState.RELOCATED;
+            return indexShard.isPrimaryMode() == false;
         }
 
         @Override
@@ -1171,6 +1155,30 @@ public abstract class TransportReplicationAction<
             // checkpoint sync) and therefore the replica should still be
             // "alive" if it were to be marked as stale.
             onSuccess.run();
+        }
+
+        protected final ShardStateAction.Listener createShardActionListener(final Runnable onSuccess,
+                                                                            final Consumer<Exception> onPrimaryDemoted,
+                                                                            final Consumer<Exception> onIgnoredFailure) {
+            return new ShardStateAction.Listener() {
+                @Override
+                public void onSuccess() {
+                    onSuccess.run();
+                }
+
+                @Override
+                public void onFailure(Exception shardFailedError) {
+                    if (shardFailedError instanceof ShardStateAction.NoLongerPrimaryShardException) {
+                        onPrimaryDemoted.accept(shardFailedError);
+                    } else {
+                        // these can occur if the node is shutting down and are okay
+                        // any other exception here is not expected and merits investigation
+                        assert shardFailedError instanceof TransportException ||
+                            shardFailedError instanceof NodeClosedException : shardFailedError;
+                        onIgnoredFailure.accept(shardFailedError);
+                    }
+                }
+            };
         }
     }
 

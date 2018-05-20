@@ -19,8 +19,8 @@
 
 package org.elasticsearch.indices.recovery;
 
+import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
-import org.apache.logging.log4j.util.Supplier;
 import org.apache.lucene.index.DirectoryReader;
 import org.apache.lucene.index.IndexCommit;
 import org.apache.lucene.store.AlreadyClosedException;
@@ -52,6 +52,7 @@ import org.elasticsearch.index.shard.ShardId;
 import org.elasticsearch.index.shard.ShardNotFoundException;
 import org.elasticsearch.index.store.Store;
 import org.elasticsearch.index.translog.Translog;
+import org.elasticsearch.index.translog.TranslogCorruptedException;
 import org.elasticsearch.indices.recovery.RecoveriesCollection.RecoveryRef;
 import org.elasticsearch.node.NodeClosedException;
 import org.elasticsearch.threadpool.ThreadPool;
@@ -64,6 +65,7 @@ import org.elasticsearch.transport.TransportService;
 
 import java.io.IOException;
 import java.util.List;
+import java.util.StringJoiner;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -141,8 +143,7 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
     }
 
     protected void retryRecovery(final long recoveryId, final Throwable reason, TimeValue retryAfter, TimeValue activityTimeout) {
-        logger.trace(
-            (Supplier<?>) () -> new ParameterizedMessage(
+        logger.trace(() -> new ParameterizedMessage(
                 "will retry recovery with id [{}] in [{}]", recoveryId, retryAfter), reason);
         retryRecovery(recoveryId, retryAfter, activityTimeout);
     }
@@ -226,12 +227,8 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
             logger.trace("recovery cancelled", e);
         } catch (Exception e) {
             if (logger.isTraceEnabled()) {
-                logger.trace(
-                    (Supplier<?>) () -> new ParameterizedMessage(
-                        "[{}][{}] Got exception on recovery",
-                        request.shardId().getIndex().getName(),
-                        request.shardId().id()),
-                    e);
+                logger.trace(() -> new ParameterizedMessage(
+                        "[{}][{}] Got exception on recovery", request.shardId().getIndex().getName(), request.shardId().id()), e);
             }
             Throwable cause = ExceptionsHelper.unwrapCause(e);
             if (cause instanceof CancellableThreads.ExecutionCancelledException) {
@@ -320,7 +317,7 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
 
         final long startingSeqNo;
         if (metadataSnapshot.size() > 0) {
-            startingSeqNo = getStartingSeqNo(recoveryTarget);
+            startingSeqNo = getStartingSeqNo(logger, recoveryTarget);
         } else {
             startingSeqNo = SequenceNumbers.UNASSIGNED_SEQ_NO;
         }
@@ -354,12 +351,22 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
      * @return the starting sequence number or {@link SequenceNumbers#UNASSIGNED_SEQ_NO} if obtaining the starting sequence number
      * failed
      */
-    public static long getStartingSeqNo(final RecoveryTarget recoveryTarget) {
+    public static long getStartingSeqNo(final Logger logger, final RecoveryTarget recoveryTarget) {
         try {
-            final long globalCheckpoint = Translog.readGlobalCheckpoint(recoveryTarget.translogLocation());
-            final List<IndexCommit> existingCommits = DirectoryReader.listCommits(recoveryTarget.store().directory());
+            final Store store = recoveryTarget.store();
+            final String translogUUID = store.readLastCommittedSegmentsInfo().getUserData().get(Translog.TRANSLOG_UUID_KEY);
+            final long globalCheckpoint = Translog.readGlobalCheckpoint(recoveryTarget.translogLocation(), translogUUID);
+            final List<IndexCommit> existingCommits = DirectoryReader.listCommits(store.directory());
             final IndexCommit safeCommit = CombinedDeletionPolicy.findSafeCommitPoint(existingCommits, globalCheckpoint);
-            final SequenceNumbers.CommitInfo seqNoStats = recoveryTarget.store().loadSeqNoInfo(safeCommit);
+            final SequenceNumbers.CommitInfo seqNoStats = Store.loadSeqNoInfo(safeCommit);
+            if (logger.isTraceEnabled()) {
+                final StringJoiner descriptionOfExistingCommits = new StringJoiner(",");
+                for (IndexCommit commit : existingCommits) {
+                    descriptionOfExistingCommits.add(CombinedDeletionPolicy.commitDescription(commit));
+                }
+                logger.trace("Calculate starting seqno based on global checkpoint [{}], safe commit [{}], existing commits [{}]",
+                    globalCheckpoint, CombinedDeletionPolicy.commitDescription(safeCommit), descriptionOfExistingCommits);
+            }
             if (seqNoStats.maxSeqNo <= globalCheckpoint) {
                 assert seqNoStats.localCheckpoint <= globalCheckpoint;
                 /*
@@ -371,7 +378,7 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
             } else {
                 return SequenceNumbers.UNASSIGNED_SEQ_NO;
             }
-        } catch (final IOException e) {
+        } catch (final TranslogCorruptedException | IOException e) {
             /*
              * This can happen, for example, if a phase one of the recovery completed successfully, a network partition happens before the
              * translog on the recovery target is opened, the recovery enters a retry loop seeing now that the index files are on disk and
@@ -393,7 +400,7 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
         public void messageReceived(RecoveryPrepareForTranslogOperationsRequest request, TransportChannel channel) throws Exception {
             try (RecoveryRef recoveryRef = onGoingRecoveries.getRecoverySafe(request.recoveryId(), request.shardId()
             )) {
-                recoveryRef.target().prepareForTranslogOperations(request.createNewTranslog(), request.totalTranslogOps());
+                recoveryRef.target().prepareForTranslogOperations(request.isFileBasedRecovery(), request.totalTranslogOps());
             }
             channel.sendResponse(TransportResponse.Empty.INSTANCE);
         }
@@ -519,12 +526,9 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
                 long currentVersion = future.get();
                 logger.trace("successfully waited for cluster state with version {} (current: {})", clusterStateVersion, currentVersion);
             } catch (Exception e) {
-                logger.debug(
-                    (Supplier<?>) () -> new ParameterizedMessage(
+                logger.debug(() -> new ParameterizedMessage(
                         "failed waiting for cluster state with version {} (current: {})",
-                        clusterStateVersion,
-                        clusterService.state().getVersion()),
-                    e);
+                        clusterStateVersion, clusterService.state().getVersion()), e);
                 throw ExceptionsHelper.convertToRuntime(e);
             }
         }
@@ -602,16 +606,13 @@ public class PeerRecoveryTargetService extends AbstractComponent implements Inde
         public void onFailure(Exception e) {
             try (RecoveryRef recoveryRef = onGoingRecoveries.getRecovery(recoveryId)) {
                 if (recoveryRef != null) {
-                    logger.error(
-                        (Supplier<?>) () -> new ParameterizedMessage(
-                            "unexpected error during recovery [{}], failing shard", recoveryId), e);
+                    logger.error(() -> new ParameterizedMessage("unexpected error during recovery [{}], failing shard", recoveryId), e);
                     onGoingRecoveries.failRecovery(recoveryId,
                             new RecoveryFailedException(recoveryRef.target().state(), "unexpected error", e),
                             true // be safe
                     );
                 } else {
-                    logger.debug(
-                        (Supplier<?>) () -> new ParameterizedMessage(
+                    logger.debug(() -> new ParameterizedMessage(
                             "unexpected error during recovery, but recovery id [{}] is finished", recoveryId), e);
                 }
             }

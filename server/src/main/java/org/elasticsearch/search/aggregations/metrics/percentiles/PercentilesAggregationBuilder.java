@@ -42,13 +42,14 @@ import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
 import java.util.Arrays;
+import java.util.Map;
 import java.util.Objects;
 import java.util.function.Consumer;
 
 public class PercentilesAggregationBuilder extends LeafOnly<ValuesSource.Numeric, PercentilesAggregationBuilder> {
     public static final String NAME = Percentiles.TYPE_NAME;
 
-    public static final double[] DEFAULT_PERCENTS = new double[] { 1, 5, 25, 50, 75, 95, 99 };
+    private static final double[] DEFAULT_PERCENTS = new double[] { 1, 5, 25, 50, 75, 95, 99 };
     public static final ParseField PERCENTS_FIELD = new ParseField("percents");
     public static final ParseField KEYED_FIELD = new ParseField("keyed");
     public static final ParseField METHOD_FIELD = new ParseField("method");
@@ -134,6 +135,21 @@ public class PercentilesAggregationBuilder extends LeafOnly<ValuesSource.Numeric
 
     public PercentilesAggregationBuilder(String name) {
         super(name, ValuesSourceType.NUMERIC, ValueType.NUMERIC);
+    }
+
+    protected PercentilesAggregationBuilder(PercentilesAggregationBuilder clone,
+                                            Builder factoriesBuilder, Map<String, Object> metaData) {
+        super(clone, factoriesBuilder, metaData);
+        this.percents = clone.percents;
+        this.method = clone.method;
+        this.numberOfSignificantValueDigits = clone.numberOfSignificantValueDigits;
+        this.compression = clone.compression;
+        this.keyed = clone.keyed;
+    }
+
+    @Override
+    protected AggregationBuilder shallowCopy(Builder factoriesBuilder, Map<String, Object> metaData) {
+        return new PercentilesAggregationBuilder(this, factoriesBuilder, metaData);
     }
 
     /**

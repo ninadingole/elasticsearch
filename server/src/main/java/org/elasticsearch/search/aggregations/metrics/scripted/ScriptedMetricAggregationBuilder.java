@@ -30,11 +30,14 @@ import org.elasticsearch.script.ExecutableScript;
 import org.elasticsearch.script.Script;
 import org.elasticsearch.script.SearchScript;
 import org.elasticsearch.search.aggregations.AbstractAggregationBuilder;
+import org.elasticsearch.search.aggregations.AggregationBuilder;
+import org.elasticsearch.search.aggregations.AggregatorFactories;
 import org.elasticsearch.search.aggregations.AggregatorFactories.Builder;
 import org.elasticsearch.search.aggregations.AggregatorFactory;
 import org.elasticsearch.search.internal.SearchContext;
 
 import java.io.IOException;
+import java.util.Collections;
 import java.util.Map;
 import java.util.Objects;
 
@@ -55,6 +58,21 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
 
     public ScriptedMetricAggregationBuilder(String name) {
         super(name);
+    }
+
+    protected ScriptedMetricAggregationBuilder(ScriptedMetricAggregationBuilder clone,
+                                               Builder factoriesBuilder, Map<String, Object> metaData) {
+        super(clone, factoriesBuilder, metaData);
+        this.initScript = clone.initScript;
+        this.mapScript = clone.mapScript;
+        this.combineScript = clone.combineScript;
+        this.reduceScript = clone.reduceScript;
+        this.params = clone.params;
+    }
+
+    @Override
+    protected AggregationBuilder shallowCopy(Builder factoriesBuilder, Map<String, Object> metaData) {
+        return new ScriptedMetricAggregationBuilder(this, factoriesBuilder, metaData);
     }
 
     /**
@@ -85,7 +103,7 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Set the <tt>init</tt> script.
+     * Set the {@code init} script.
      */
     public ScriptedMetricAggregationBuilder initScript(Script initScript) {
         if (initScript == null) {
@@ -96,14 +114,14 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Get the <tt>init</tt> script.
+     * Get the {@code init} script.
      */
     public Script initScript() {
         return initScript;
     }
 
     /**
-     * Set the <tt>map</tt> script.
+     * Set the {@code map} script.
      */
     public ScriptedMetricAggregationBuilder mapScript(Script mapScript) {
         if (mapScript == null) {
@@ -114,14 +132,14 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Get the <tt>map</tt> script.
+     * Get the {@code map} script.
      */
     public Script mapScript() {
         return mapScript;
     }
 
     /**
-     * Set the <tt>combine</tt> script.
+     * Set the {@code combine} script.
      */
     public ScriptedMetricAggregationBuilder combineScript(Script combineScript) {
         if (combineScript == null) {
@@ -132,14 +150,14 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Get the <tt>combine</tt> script.
+     * Get the {@code combine} script.
      */
     public Script combineScript() {
         return combineScript;
     }
 
     /**
-     * Set the <tt>reduce</tt> script.
+     * Set the {@code reduce} script.
      */
     public ScriptedMetricAggregationBuilder reduceScript(Script reduceScript) {
         if (reduceScript == null) {
@@ -150,15 +168,15 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Get the <tt>reduce</tt> script.
+     * Get the {@code reduce} script.
      */
     public Script reduceScript() {
         return reduceScript;
     }
 
     /**
-     * Set parameters that will be available in the <tt>init</tt>,
-     * <tt>map</tt> and <tt>combine</tt> phases.
+     * Set parameters that will be available in the {@code init},
+     * {@code map} and {@code combine} phases.
      */
     public ScriptedMetricAggregationBuilder params(Map<String, Object> params) {
         if (params == null) {
@@ -169,8 +187,8 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
     }
 
     /**
-     * Get parameters that will be available in the <tt>init</tt>,
-     * <tt>map</tt> and <tt>combine</tt> phases.
+     * Get parameters that will be available in the {@code init},
+     * {@code map} and {@code combine} phases.
      */
     public Map<String, Object> params() {
         return params;
@@ -181,20 +199,34 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
             Builder subfactoriesBuilder) throws IOException {
 
         QueryShardContext queryShardContext = context.getQueryShardContext();
+
+        // Extract params from scripts and pass them along to ScriptedMetricAggregatorFactory, since it won't have
+        // access to them for the scripts it's given precompiled.
+
         ExecutableScript.Factory executableInitScript;
+        Map<String, Object> initScriptParams;
         if (initScript != null) {
             executableInitScript = queryShardContext.getScriptService().compile(initScript, ExecutableScript.AGGS_CONTEXT);
+            initScriptParams = initScript.getParams();
         } else {
             executableInitScript = p -> null;
+            initScriptParams = Collections.emptyMap();
         }
+
         SearchScript.Factory searchMapScript = queryShardContext.getScriptService().compile(mapScript, SearchScript.AGGS_CONTEXT);
+        Map<String, Object> mapScriptParams = mapScript.getParams();
+
         ExecutableScript.Factory executableCombineScript;
+        Map<String, Object> combineScriptParams;
         if (combineScript != null) {
-            executableCombineScript =queryShardContext.getScriptService().compile(combineScript, ExecutableScript.AGGS_CONTEXT);
+            executableCombineScript = queryShardContext.getScriptService().compile(combineScript, ExecutableScript.AGGS_CONTEXT);
+            combineScriptParams = combineScript.getParams();
         } else {
             executableCombineScript = p -> null;
+            combineScriptParams = Collections.emptyMap();
         }
-        return new ScriptedMetricAggregatorFactory(name, searchMapScript, executableInitScript, executableCombineScript, reduceScript,
+        return new ScriptedMetricAggregatorFactory(name, searchMapScript, mapScriptParams, executableInitScript, initScriptParams,
+                executableCombineScript, combineScriptParams, reduceScript,
                 params, queryShardContext.lookup(), context, parent, subfactoriesBuilder, metaData);
     }
 
@@ -238,16 +270,16 @@ public class ScriptedMetricAggregationBuilder extends AbstractAggregationBuilder
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
             } else if (token == XContentParser.Token.START_OBJECT || token == XContentParser.Token.VALUE_STRING) {
-                if (INIT_SCRIPT_FIELD.match(currentFieldName)) {
+                if (INIT_SCRIPT_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     initScript = Script.parse(parser);
-                } else if (MAP_SCRIPT_FIELD.match(currentFieldName)) {
+                } else if (MAP_SCRIPT_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     mapScript = Script.parse(parser);
-                } else if (COMBINE_SCRIPT_FIELD.match(currentFieldName)) {
+                } else if (COMBINE_SCRIPT_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     combineScript = Script.parse(parser);
-                } else if (REDUCE_SCRIPT_FIELD.match(currentFieldName)) {
+                } else if (REDUCE_SCRIPT_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     reduceScript = Script.parse(parser);
                 } else if (token == XContentParser.Token.START_OBJECT &&
-                        PARAMS_FIELD.match(currentFieldName)) {
+                        PARAMS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     params = parser.map();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(),

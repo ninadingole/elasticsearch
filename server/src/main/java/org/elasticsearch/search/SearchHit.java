@@ -43,6 +43,7 @@ import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.common.xcontent.XContentParser.Token;
+import org.elasticsearch.index.mapper.IgnoredFieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.SourceFieldMapper;
 import org.elasticsearch.index.shard.ShardId;
@@ -54,6 +55,7 @@ import org.elasticsearch.transport.RemoteClusterAware;
 import java.io.IOException;
 import java.util.ArrayList;
 import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.Iterator;
 import java.util.List;
@@ -69,7 +71,7 @@ import static org.elasticsearch.common.xcontent.ConstructingObjectParser.constru
 import static org.elasticsearch.common.xcontent.ConstructingObjectParser.optionalConstructorArg;
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureExpectedToken;
 import static org.elasticsearch.common.xcontent.XContentParserUtils.ensureFieldName;
-import static org.elasticsearch.common.xcontent.XContentParserUtils.parseStoredFieldsValue;
+import static org.elasticsearch.common.xcontent.XContentParserUtils.parseFieldsValue;
 import static org.elasticsearch.search.fetch.subphase.highlight.HighlightField.readHighlightField;
 
 /**
@@ -225,7 +227,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
     }
 
     /**
-     * The source of the document as string (can be <tt>null</tt>).
+     * The source of the document as string (can be {@code null}).
      */
     public String getSourceAsString() {
         if (source == null) {
@@ -240,7 +242,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
 
 
     /**
-     * The source of the document as a map (can be <tt>null</tt>).
+     * The source of the document as a map (can be {@code null}).
      */
     public Map<String, Object> getSourceAsMap() {
         if (source == null) {
@@ -425,7 +427,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
         if (index != null) {
             builder.field(Fields._INDEX, RemoteClusterAware.buildRemoteIndexName(clusterAlias, index));
         }
-        if (type != null) {
+        if (type != null && params.paramAsBoolean("include_type_name", true)) {
             builder.field(Fields._TYPE, type);
         }
         if (id != null) {
@@ -443,8 +445,13 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
             builder.field(Fields._SCORE, score);
         }
         for (DocumentField field : metaFields) {
-            Object value = field.getValue();
-            builder.field(field.getName(), value);
+            // _ignored is the only multi-valued meta field
+            // TODO: can we avoid having an exception here?
+            if (field.getName().equals(IgnoredFieldMapper.NAME)) {
+                builder.field(field.getName(), field.getValues());
+            } else {
+                builder.field(field.getName(), field.<Object>getValue());
+            }
         }
         if (source != null) {
             XContentHelper.writeRawField(SourceFieldMapper.NAME, source, builder, params);
@@ -542,7 +549,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
         String id = get(Fields._ID, values, null);
         Text type = get(Fields._TYPE, values, null);
         NestedIdentity nestedIdentity = get(NestedIdentity._NESTED, values, null);
-        Map<String, DocumentField> fields = get(Fields.FIELDS, values, null);
+        Map<String, DocumentField> fields = get(Fields.FIELDS, values, Collections.emptyMap());
 
         SearchHit searchHit = new SearchHit(-1, id, type, nestedIdentity, fields);
         searchHit.index = get(Fields._INDEX, values, null);
@@ -562,7 +569,6 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
         if (shardId != null && nodeId != null) {
             searchHit.shard(new SearchShardTarget(nodeId, shardId, null, OriginalIndices.NONE));
         }
-        searchHit.fields(fields);
         return searchHit;
     }
 
@@ -585,7 +591,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
             // pretty printing are not preserved,
             // it all depends on the current builder settings
             builder.copyCurrentStructure(parser);
-            return builder.bytes();
+            return BytesReference.bytes(builder);
         }
     }
 
@@ -604,7 +610,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
                     fieldMap.put(field.getName(), field);
                 }, (p, c) -> {
                     List<Object> values = new ArrayList<>();
-                    values.add(parseStoredFieldsValue(p));
+                    values.add(parseFieldsValue(p));
                     return new DocumentField(metadatafield, values);
                 }, new ParseField(metadatafield), ValueType.VALUE);
             }
@@ -649,7 +655,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
         String description = null;
         List<Explanation> details = new ArrayList<>();
         while ((token = parser.nextToken()) != XContentParser.Token.END_OBJECT) {
-            ensureExpectedToken(XContentParser.Token.FIELD_NAME, token, () -> parser.getTokenLocation());
+            ensureExpectedToken(XContentParser.Token.FIELD_NAME, token, parser::getTokenLocation);
             String currentFieldName = parser.currentName();
             token = parser.nextToken();
             if (Fields.VALUE.equals(currentFieldName)) {
@@ -657,7 +663,7 @@ public final class SearchHit implements Streamable, ToXContentObject, Iterable<D
             } else if (Fields.DESCRIPTION.equals(currentFieldName)) {
                 description = parser.textOrNull();
             } else if (Fields.DETAILS.equals(currentFieldName)) {
-                ensureExpectedToken(XContentParser.Token.START_ARRAY, token, () -> parser.getTokenLocation());
+                ensureExpectedToken(XContentParser.Token.START_ARRAY, token, parser::getTokenLocation);
                 while ((token = parser.nextToken()) != XContentParser.Token.END_ARRAY) {
                     details.add(parseExplanation(parser));
                 }

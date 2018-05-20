@@ -21,6 +21,7 @@ package org.elasticsearch.action.admin.indices.shrink;
 import org.elasticsearch.Version;
 import org.elasticsearch.action.ActionRequestValidationException;
 import org.elasticsearch.action.IndicesRequest;
+import org.elasticsearch.action.admin.indices.alias.Alias;
 import org.elasticsearch.action.admin.indices.create.CreateIndexRequest;
 import org.elasticsearch.action.support.ActiveShardCount;
 import org.elasticsearch.action.support.IndicesOptions;
@@ -30,6 +31,9 @@ import org.elasticsearch.common.ParseField;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.xcontent.ObjectParser;
+import org.elasticsearch.common.xcontent.ToXContentObject;
+import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentParser;
 
 import java.io.IOException;
 import java.util.Objects;
@@ -39,7 +43,7 @@ import static org.elasticsearch.action.ValidateActions.addValidationError;
 /**
  * Request class to shrink an index into a single shard
  */
-public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements IndicesRequest {
+public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements IndicesRequest, ToXContentObject {
 
     public static final ObjectParser<ResizeRequest, Void> PARSER = new ObjectParser<>("resize_request", null);
     static {
@@ -52,6 +56,7 @@ public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements
     private CreateIndexRequest targetIndexRequest;
     private String sourceIndex;
     private ResizeType type = ResizeType.SHRINK;
+    private Boolean copySettings = true;
 
     ResizeRequest() {}
 
@@ -75,6 +80,7 @@ public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements
         if (type == ResizeType.SPLIT && IndexMetaData.INDEX_NUMBER_OF_SHARDS_SETTING.exists(targetIndexRequest.settings()) == false) {
             validationException = addValidationError("index.number_of_shards is required for split operations", validationException);
         }
+        assert copySettings == null || copySettings;
         return validationException;
     }
 
@@ -93,6 +99,11 @@ public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements
         } else {
             type = ResizeType.SHRINK; // BWC this used to be shrink only
         }
+        if (in.getVersion().before(Version.V_6_4_0)) {
+            copySettings = null;
+        } else {
+            copySettings = in.readOptionalBoolean();
+        }
     }
 
     @Override
@@ -102,6 +113,12 @@ public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements
         out.writeString(sourceIndex);
         if (out.getVersion().onOrAfter(ResizeAction.COMPATIBILITY_VERSION)) {
             out.writeEnum(type);
+        }
+        // noinspection StatementWithEmptyBody
+        if (out.getVersion().before(Version.V_6_4_0)) {
+
+        } else {
+            out.writeOptionalBoolean(copySettings);
         }
     }
 
@@ -172,5 +189,41 @@ public class ResizeRequest extends AcknowledgedRequest<ResizeRequest> implements
      */
     public ResizeType getResizeType() {
         return type;
+    }
+
+    public void setCopySettings(final Boolean copySettings) {
+        if (copySettings != null && copySettings == false) {
+            throw new IllegalArgumentException("[copySettings] can not be explicitly set to [false]");
+        }
+        this.copySettings = copySettings;
+    }
+
+    public Boolean getCopySettings() {
+        return copySettings;
+    }
+
+    @Override
+    public XContentBuilder toXContent(XContentBuilder builder, Params params) throws IOException {
+        builder.startObject();
+        {
+            builder.startObject(CreateIndexRequest.SETTINGS.getPreferredName());
+            {
+                targetIndexRequest.settings().toXContent(builder, params);
+            }
+            builder.endObject();
+            builder.startObject(CreateIndexRequest.ALIASES.getPreferredName());
+            {
+                for (Alias alias : targetIndexRequest.aliases()) {
+                    alias.toXContent(builder, params);
+                }
+            }
+            builder.endObject();
+        }
+        builder.endObject();
+        return builder;
+    }
+
+    public void fromXContent(XContentParser parser) throws IOException {
+        PARSER.parse(parser, this, null);
     }
 }

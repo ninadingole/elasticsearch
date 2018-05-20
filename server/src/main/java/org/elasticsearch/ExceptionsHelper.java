@@ -26,6 +26,7 @@ import org.apache.lucene.index.IndexFormatTooOldException;
 import org.elasticsearch.action.ShardOperationFailedException;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.logging.Loggers;
+import org.elasticsearch.common.util.concurrent.EsRejectedExecutionException;
 import org.elasticsearch.index.Index;
 import org.elasticsearch.rest.RestStatus;
 
@@ -33,9 +34,15 @@ import java.io.IOException;
 import java.io.PrintWriter;
 import java.io.StringWriter;
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.Collections;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.List;
+import java.util.Optional;
+import java.util.Queue;
 import java.util.Set;
+import java.util.stream.Collectors;
 
 public final class ExceptionsHelper {
 
@@ -61,6 +68,8 @@ public final class ExceptionsHelper {
                 return ((ElasticsearchException) t).status();
             } else if (t instanceof IllegalArgumentException) {
                 return RestStatus.BAD_REQUEST;
+            } else if (t instanceof EsRejectedExecutionException) {
+                return RestStatus.TOO_MANY_REQUESTS;
             }
         }
         return RestStatus.INTERNAL_SERVER_ERROR;
@@ -120,6 +129,46 @@ public final class ExceptionsHelper {
         PrintWriter printWriter = new PrintWriter(stackTraceStringWriter);
         e.printStackTrace(printWriter);
         return stackTraceStringWriter.toString();
+    }
+
+    public static String formatStackTrace(final StackTraceElement[] stackTrace) {
+        return Arrays.stream(stackTrace).skip(1).map(e -> "\tat " + e).collect(Collectors.joining("\n"));
+    }
+
+    static final int MAX_ITERATIONS = 1024;
+
+    /**
+     * Unwrap the specified throwable looking for any suppressed errors or errors as a root cause of the specified throwable.
+     *
+     * @param cause the root throwable
+     *
+     * @return an optional error if one is found suppressed or a root cause in the tree rooted at the specified throwable
+     */
+    public static Optional<Error> maybeError(final Throwable cause, final Logger logger) {
+        // early terminate if the cause is already an error
+        if (cause instanceof Error) {
+            return Optional.of((Error) cause);
+        }
+
+        final Queue<Throwable> queue = new LinkedList<>();
+        queue.add(cause);
+        int iterations = 0;
+        while (!queue.isEmpty()) {
+            iterations++;
+            if (iterations > MAX_ITERATIONS) {
+                logger.warn("giving up looking for fatal errors", cause);
+                break;
+            }
+            final Throwable current = queue.remove();
+            if (current instanceof Error) {
+                return Optional.of((Error) current);
+            }
+            Collections.addAll(queue, current.getSuppressed());
+            if (current.getCause() != null) {
+                queue.add(current.getCause());
+            }
+        }
+        return Optional.empty();
     }
 
     /**
@@ -191,6 +240,35 @@ public final class ExceptionsHelper {
             }
         }
         return true;
+    }
+
+    /**
+     * If the specified cause is an unrecoverable error, this method will rethrow the cause on a separate thread so that it can not be
+     * caught and bubbles up to the uncaught exception handler.
+     *
+     * @param throwable the throwable to test
+     */
+    public static void dieOnError(Throwable throwable) {
+        final Optional<Error> maybeError = ExceptionsHelper.maybeError(throwable, logger);
+        if (maybeError.isPresent()) {
+            /*
+             * Here be dragons. We want to rethrow this so that it bubbles up to the uncaught exception handler. Yet, Netty wraps too many
+             * invocations of user-code in try/catch blocks that swallow all throwables. This means that a rethrow here will not bubble up
+             * to where we want it to. So, we fork a thread and throw the exception from there where Netty can not get to it. We do not wrap
+             * the exception so as to not lose the original cause during exit.
+             */
+            try {
+                // try to log the current stack trace
+                final String formatted = ExceptionsHelper.formatStackTrace(Thread.currentThread().getStackTrace());
+                logger.error("fatal error\n{}", formatted);
+            } finally {
+                new Thread(
+                    () -> {
+                        throw maybeError.get();
+                    })
+                    .start();
+            }
+        }
     }
 
     /**

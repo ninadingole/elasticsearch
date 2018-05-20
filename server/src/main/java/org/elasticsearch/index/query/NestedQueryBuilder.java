@@ -132,6 +132,7 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
 
     public NestedQueryBuilder innerHit(InnerHitBuilder innerHitBuilder) {
         this.innerHitBuilder = innerHitBuilder;
+        innerHitBuilder.setIgnoreUnmapped(ignoreUnmapped);
         return this;
     }
 
@@ -149,6 +150,9 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
      */
     public NestedQueryBuilder ignoreUnmapped(boolean ignoreUnmapped) {
         this.ignoreUnmapped = ignoreUnmapped;
+        if (innerHitBuilder != null) {
+            innerHitBuilder.setIgnoreUnmapped(ignoreUnmapped);
+        }
         return this;
     }
 
@@ -192,23 +196,23 @@ public class NestedQueryBuilder extends AbstractQueryBuilder<NestedQueryBuilder>
             if (token == XContentParser.Token.FIELD_NAME) {
                 currentFieldName = parser.currentName();
             } else if (token == XContentParser.Token.START_OBJECT) {
-                if (QUERY_FIELD.match(currentFieldName)) {
+                if (QUERY_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     query = parseInnerQueryBuilder(parser);
-                } else if (INNER_HITS_FIELD.match(currentFieldName)) {
+                } else if (INNER_HITS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     innerHitBuilder = InnerHitBuilder.fromXContent(parser);
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[nested] query does not support [" + currentFieldName + "]");
                 }
             } else if (token.isValue()) {
-                if (PATH_FIELD.match(currentFieldName)) {
+                if (PATH_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     path = parser.text();
-                } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName)) {
+                } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     boost = parser.floatValue();
-                } else if (IGNORE_UNMAPPED_FIELD.match(currentFieldName)) {
+                } else if (IGNORE_UNMAPPED_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     ignoreUnmapped = parser.booleanValue();
-                } else if (SCORE_MODE_FIELD.match(currentFieldName)) {
+                } else if (SCORE_MODE_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     scoreMode = parseScoreMode(parser.text());
-                } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName)) {
+                } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                     queryName = parser.text();
                 } else {
                     throw new ParsingException(parser.getTokenLocation(), "[nested] query does not support [" + currentFieldName + "]");

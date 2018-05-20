@@ -32,6 +32,7 @@ import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.NamedWriteableAwareStreamInput;
 import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.settings.Settings;
+import org.elasticsearch.common.xcontent.DeprecationHandler;
 import org.elasticsearch.common.xcontent.ToXContent;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentFactory;
@@ -73,6 +74,8 @@ public class ShardSearchTransportRequestTests extends AbstractSearchTestCase {
                 assertEquals(deserializedRequest.searchType(), shardSearchTransportRequest.searchType());
                 assertEquals(deserializedRequest.shardId(), shardSearchTransportRequest.shardId());
                 assertEquals(deserializedRequest.numberOfShards(), shardSearchTransportRequest.numberOfShards());
+                assertEquals(deserializedRequest.indexRoutings(), shardSearchTransportRequest.indexRoutings());
+                assertEquals(deserializedRequest.preference(), shardSearchTransportRequest.preference());
                 assertEquals(deserializedRequest.cacheKey(), shardSearchTransportRequest.cacheKey());
                 assertNotSame(deserializedRequest, shardSearchTransportRequest);
                 assertEquals(deserializedRequest.getAliasFilter(), shardSearchTransportRequest.getAliasFilter());
@@ -91,8 +94,10 @@ public class ShardSearchTransportRequestTests extends AbstractSearchTestCase {
         } else {
             filteringAliases = new AliasFilter(null, Strings.EMPTY_ARRAY);
         }
+        final String[] routings = generateRandomStringArray(5, 10, false, true);
         return new ShardSearchTransportRequest(new OriginalIndices(searchRequest), searchRequest, shardId,
-                randomIntBetween(1, 100), filteringAliases, randomBoolean() ? 1.0f : randomFloat(), Math.abs(randomLong()), null);
+            randomIntBetween(1, 100), filteringAliases, randomBoolean() ? 1.0f : randomFloat(),
+            Math.abs(randomLong()), null, routings);
     }
 
     public void testFilteringAliases() throws Exception {
@@ -145,7 +150,7 @@ public class ShardSearchTransportRequestTests extends AbstractSearchTestCase {
         XContentBuilder builder = XContentFactory.jsonBuilder();
         filterBuilder.toXContent(builder, ToXContent.EMPTY_PARAMS);
         builder.close();
-        return new CompressedXContent(builder.string());
+        return new CompressedXContent(Strings.toString(builder));
     }
 
     private IndexMetaData remove(IndexMetaData indexMetaData, String alias) {
@@ -159,7 +164,8 @@ public class ShardSearchTransportRequestTests extends AbstractSearchTestCase {
 
     public QueryBuilder aliasFilter(IndexMetaData indexMetaData, String... aliasNames) {
         CheckedFunction<byte[], QueryBuilder, IOException> filterParser = bytes -> {
-            try (XContentParser parser = XContentFactory.xContent(bytes).createParser(xContentRegistry(), bytes)) {
+            try (XContentParser parser = XContentFactory.xContent(bytes)
+                    .createParser(xContentRegistry(), DeprecationHandler.THROW_UNSUPPORTED_OPERATION, bytes)) {
                 return parseInnerQueryBuilder(parser);
             }
         };

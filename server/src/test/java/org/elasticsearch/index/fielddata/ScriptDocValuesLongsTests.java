@@ -26,6 +26,17 @@ import org.joda.time.DateTimeZone;
 import org.joda.time.ReadableDateTime;
 
 import java.io.IOException;
+import java.security.AccessControlContext;
+import java.security.AccessController;
+import java.security.PermissionCollection;
+import java.security.Permissions;
+import java.security.PrivilegedAction;
+import java.security.ProtectionDomain;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.function.Consumer;
+
+import static org.hamcrest.Matchers.containsInAnyOrder;
 
 public class ScriptDocValuesLongsTests extends ESTestCase {
     public void testLongs() throws IOException {
@@ -53,38 +64,6 @@ public class ScriptDocValuesLongsTests extends ESTestCase {
             Exception e = expectThrows(UnsupportedOperationException.class, () -> longs.getValues().add(100L));
             assertEquals("doc values are unmodifiable", e.getMessage());
         }
-    }
-
-    public void testDates() throws IOException {
-        long[][] values = new long[between(3, 10)][];
-        ReadableDateTime[][] dates = new ReadableDateTime[values.length][];
-        for (int d = 0; d < values.length; d++) {
-            values[d] = new long[randomBoolean() ? randomBoolean() ? 0 : 1 : between(2, 100)];
-            dates[d] = new ReadableDateTime[values[d].length];
-            for (int i = 0; i < values[d].length; i++) {
-                dates[d][i] = new DateTime(randomNonNegativeLong(), DateTimeZone.UTC);
-                values[d][i] = dates[d][i].getMillis();
-            }
-        }
-        Longs longs = wrap(values);
-
-        for (int round = 0; round < 10; round++) {
-            int d = between(0, values.length - 1);
-            longs.setNextDocId(d);
-            assertEquals(dates[d].length > 0 ? dates[d][0] : new DateTime(0, DateTimeZone.UTC), longs.getDate());
-
-            assertEquals(values[d].length, longs.getDates().size());
-            for (int i = 0; i < values[d].length; i++) {
-                assertEquals(dates[d][i], longs.getDates().get(i));
-            }
-
-            Exception e = expectThrows(UnsupportedOperationException.class, () -> longs.getDates().add(new DateTime()));
-            assertEquals("doc values are unmodifiable", e.getMessage());
-        }
-
-        assertWarnings(
-                "getDate on numeric fields is deprecated. Use a date field to get dates.",
-                "getDates on numeric fields is deprecated. Use a date field to get dates.");
     }
 
     private Longs wrap(long[][] values) {

@@ -46,7 +46,8 @@ import org.elasticsearch.cluster.ClusterStateTaskExecutor.ClusterTasksResult;
 import org.elasticsearch.cluster.ClusterStateUpdateTask;
 import org.elasticsearch.cluster.EmptyClusterInfoService;
 import org.elasticsearch.cluster.action.shard.ShardStateAction;
-import org.elasticsearch.cluster.action.shard.ShardStateAction.ShardEntry;
+import org.elasticsearch.cluster.action.shard.ShardStateAction.StartedShardEntry;
+import org.elasticsearch.cluster.action.shard.ShardStateAction.FailedShardEntry;
 import org.elasticsearch.cluster.metadata.AliasValidator;
 import org.elasticsearch.cluster.metadata.IndexMetaData;
 import org.elasticsearch.cluster.metadata.IndexNameExpressionResolver;
@@ -71,6 +72,9 @@ import org.elasticsearch.common.settings.ClusterSettings;
 import org.elasticsearch.common.settings.IndexScopedSettings;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.xcontent.NamedXContentRegistry;
+import org.elasticsearch.discovery.zen.ElectMasterService;
+import org.elasticsearch.discovery.zen.NodeJoinController;
+import org.elasticsearch.discovery.zen.ZenDiscovery;
 import org.elasticsearch.env.Environment;
 import org.elasticsearch.env.TestEnvironment;
 import org.elasticsearch.index.IndexService;
@@ -83,6 +87,7 @@ import org.elasticsearch.transport.Transport;
 import org.elasticsearch.transport.TransportService;
 
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collections;
 import java.util.HashSet;
@@ -116,6 +121,9 @@ public class ClusterStateChanges extends AbstractComponent {
     private final TransportClusterRerouteAction transportClusterRerouteAction;
     private final TransportCreateIndexAction transportCreateIndexAction;
 
+    private final ZenDiscovery.NodeRemovalClusterStateTaskExecutor nodeRemovalExecutor;
+    private final NodeJoinController.JoinTaskExecutor joinTaskExecutor;
+
     public ClusterStateChanges(NamedXContentRegistry xContentRegistry, ThreadPool threadPool) {
         super(Settings.builder().put(PATH_HOME_SETTING.getKey(), "dummy").build());
 
@@ -147,7 +155,7 @@ public class ClusterStateChanges extends AbstractComponent {
                     when(indexService.index()).thenReturn(indexMetaData.getIndex());
                     MapperService mapperService = mock(MapperService.class);
                     when(indexService.mapperService()).thenReturn(mapperService);
-                    when(mapperService.docMappers(anyBoolean())).thenReturn(Collections.emptyList());
+                    when(mapperService.documentMapper()).thenReturn(null);
                     when(indexService.getIndexEventListener()).thenReturn(new IndexEventListener() {});
                     when(indexService.getIndexSortSupplier()).thenReturn(() -> null);
                     return indexService;
@@ -190,6 +198,11 @@ public class ClusterStateChanges extends AbstractComponent {
             transportService, clusterService, threadPool, allocationService, actionFilters, indexNameExpressionResolver);
         transportCreateIndexAction = new TransportCreateIndexAction(settings,
             transportService, clusterService, threadPool, createIndexService, actionFilters, indexNameExpressionResolver);
+
+        ElectMasterService electMasterService = new ElectMasterService(settings);
+        nodeRemovalExecutor = new ZenDiscovery.NodeRemovalClusterStateTaskExecutor(allocationService, electMasterService,
+            s -> { throw new AssertionError("rejoin not implemented"); }, logger);
+        joinTaskExecutor = new NodeJoinController.JoinTaskExecutor(allocationService, electMasterService, logger);
     }
 
     public ClusterState createIndex(ClusterState state, CreateIndexRequest request) {
@@ -216,21 +229,35 @@ public class ClusterStateChanges extends AbstractComponent {
         return execute(transportClusterRerouteAction, request, state);
     }
 
-    public ClusterState deassociateDeadNodes(ClusterState clusterState, boolean reroute, String reason) {
-        return allocationService.deassociateDeadNodes(clusterState, reroute, reason);
+    public ClusterState addNodes(ClusterState clusterState, List<DiscoveryNode> nodes) {
+        return runTasks(joinTaskExecutor, clusterState, nodes);
+    }
+
+    public ClusterState joinNodesAndBecomeMaster(ClusterState clusterState, List<DiscoveryNode> nodes) {
+        List<DiscoveryNode> joinNodes = new ArrayList<>();
+        joinNodes.add(NodeJoinController.BECOME_MASTER_TASK);
+        joinNodes.add(NodeJoinController.FINISH_ELECTION_TASK);
+        joinNodes.addAll(nodes);
+
+        return runTasks(joinTaskExecutor, clusterState, joinNodes);
+    }
+
+    public ClusterState removeNodes(ClusterState clusterState, List<DiscoveryNode> nodes) {
+        return runTasks(nodeRemovalExecutor, clusterState, nodes.stream()
+            .map(n -> new ZenDiscovery.NodeRemovalClusterStateTaskExecutor.Task(n, "dummy reason")).collect(Collectors.toList()));
     }
 
     public ClusterState applyFailedShards(ClusterState clusterState, List<FailedShard> failedShards) {
-        List<ShardEntry> entries = failedShards.stream().map(failedShard ->
-            new ShardEntry(failedShard.getRoutingEntry().shardId(), failedShard.getRoutingEntry().allocationId().getId(),
-                0L, failedShard.getMessage(), failedShard.getFailure()))
+        List<FailedShardEntry> entries = failedShards.stream().map(failedShard ->
+            new FailedShardEntry(failedShard.getRoutingEntry().shardId(), failedShard.getRoutingEntry().allocationId().getId(),
+                0L, failedShard.getMessage(), failedShard.getFailure(), failedShard.markAsStale()))
             .collect(Collectors.toList());
         return runTasks(shardFailedClusterStateTaskExecutor, clusterState, entries);
     }
 
     public ClusterState applyStartedShards(ClusterState clusterState, List<ShardRouting> startedShards) {
-        List<ShardEntry> entries = startedShards.stream().map(startedShard ->
-            new ShardEntry(startedShard.shardId(), startedShard.allocationId().getId(), 0L, "shard started", null))
+        List<StartedShardEntry> entries = startedShards.stream().map(startedShard ->
+            new StartedShardEntry(startedShard.shardId(), startedShard.allocationId().getId(), "shard started"))
             .collect(Collectors.toList());
         return runTasks(shardStartedClusterStateTaskExecutor, clusterState, entries);
     }

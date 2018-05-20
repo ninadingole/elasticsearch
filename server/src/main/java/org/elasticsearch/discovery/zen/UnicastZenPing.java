@@ -22,9 +22,8 @@ package org.elasticsearch.discovery.zen;
 import com.carrotsearch.hppc.cursors.ObjectCursor;
 import org.apache.logging.log4j.Logger;
 import org.apache.logging.log4j.message.ParameterizedMessage;
-import org.apache.logging.log4j.util.Supplier;
 import org.apache.lucene.store.AlreadyClosedException;
-import org.apache.lucene.util.IOUtils;
+import org.elasticsearch.core.internal.io.IOUtils;
 import org.elasticsearch.Version;
 import org.elasticsearch.cluster.ClusterName;
 import org.elasticsearch.cluster.ClusterState;
@@ -91,7 +90,6 @@ import static java.util.Collections.emptyList;
 import static java.util.Collections.emptyMap;
 import static java.util.Collections.emptySet;
 import static org.elasticsearch.common.util.concurrent.ConcurrentCollections.newConcurrentMap;
-import static org.elasticsearch.discovery.zen.ZenPing.PingResponse.readPingResponse;
 
 public class UnicastZenPing extends AbstractComponent implements ZenPing {
 
@@ -162,7 +160,7 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
             concurrentConnects,
             resolveTimeout);
 
-        transportService.registerRequestHandler(ACTION_NAME, UnicastPingRequest::new, ThreadPool.Names.SAME,
+        transportService.registerRequestHandler(ACTION_NAME, ThreadPool.Names.SAME, UnicastPingRequest::new,
             new UnicastPingRequestHandler());
 
         final ThreadFactory threadFactory = EsExecutors.daemonThreadFactory(settings, "[unicast_connect]");
@@ -456,12 +454,8 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
 
 
     protected void sendPings(final TimeValue timeout, final PingingRound pingingRound) {
-        final UnicastPingRequest pingRequest = new UnicastPingRequest();
-        pingRequest.id = pingingRound.id();
-        pingRequest.timeout = timeout;
-        ClusterState lastState = contextProvider.clusterState();
-
-        pingRequest.pingResponse = createPingResponse(lastState);
+        final ClusterState lastState = contextProvider.clusterState();
+        final UnicastPingRequest pingRequest = new UnicastPingRequest(pingingRound.id(), timeout, createPingResponse(lastState));
 
         Set<DiscoveryNode> nodesFromResponses = temporalResponses.stream().map(pingResponse -> {
             assert clusterName.equals(pingResponse.clusterName()) :
@@ -518,18 +512,13 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
             public void onFailure(Exception e) {
                 if (e instanceof ConnectTransportException || e instanceof AlreadyClosedException) {
                     // can't connect to the node - this is more common path!
-                    logger.trace(
-                        (Supplier<?>) () -> new ParameterizedMessage(
-                            "[{}] failed to ping {}", pingingRound.id(), node), e);
+                    logger.trace(() -> new ParameterizedMessage("[{}] failed to ping {}", pingingRound.id(), node), e);
                 } else if (e instanceof RemoteTransportException) {
                     // something went wrong on the other side
-                    logger.debug(
-                        (Supplier<?>) () -> new ParameterizedMessage(
+                    logger.debug(() -> new ParameterizedMessage(
                             "[{}] received a remote error as a response to ping {}", pingingRound.id(), node), e);
                 } else {
-                    logger.warn(
-                        (Supplier<?>) () -> new ParameterizedMessage(
-                            "[{}] failed send ping to {}", pingingRound.id(), node), e);
+                    logger.warn(() -> new ParameterizedMessage("[{}] failed send ping to {}", pingingRound.id(), node), e);
                 }
             }
 
@@ -553,8 +542,8 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
         return new TransportResponseHandler<UnicastPingResponse>() {
 
             @Override
-            public UnicastPingResponse newInstance() {
-                return new UnicastPingResponse();
+            public UnicastPingResponse read(StreamInput in) throws IOException {
+                return new UnicastPingResponse(in);
             }
 
             @Override
@@ -579,9 +568,9 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
                 if (exp instanceof ConnectTransportException || exp.getCause() instanceof ConnectTransportException ||
                     exp.getCause() instanceof AlreadyClosedException) {
                     // ok, not connected...
-                    logger.trace((Supplier<?>) () -> new ParameterizedMessage("failed to connect to {}", node), exp);
+                    logger.trace(() -> new ParameterizedMessage("failed to connect to {}", node), exp);
                 } else if (closed == false) {
-                    logger.warn((Supplier<?>) () -> new ParameterizedMessage("failed to send ping to [{}]", node), exp);
+                    logger.warn(() -> new ParameterizedMessage("failed to send ping to [{}]", node), exp);
                 }
             }
         };
@@ -599,11 +588,7 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
         List<PingResponse> pingResponses = CollectionUtils.iterableAsArrayList(temporalResponses);
         pingResponses.add(createPingResponse(contextProvider.clusterState()));
 
-        UnicastPingResponse unicastPingResponse = new UnicastPingResponse();
-        unicastPingResponse.id = request.id;
-        unicastPingResponse.pingResponses = pingResponses.toArray(new PingResponse[pingResponses.size()]);
-
-        return unicastPingResponse;
+        return new UnicastPingResponse(request.id, pingResponses.toArray(new PingResponse[pingResponses.size()]));
     }
 
     class UnicastPingRequestHandler implements TransportRequestHandler<UnicastPingRequest> {
@@ -627,28 +612,35 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
 
     }
 
-    public static class UnicastPingRequest extends TransportRequest {
+    static class UnicastPingRequest extends TransportRequest {
 
-        int id;
-        TimeValue timeout;
-        PingResponse pingResponse;
+        final int id;
+        final TimeValue timeout;
+        final PingResponse pingResponse;
 
-        public UnicastPingRequest() {
+        UnicastPingRequest(int id, TimeValue timeout, PingResponse pingResponse) {
+            this.id = id;
+            this.timeout = timeout;
+            this.pingResponse = pingResponse;
+        }
+
+        UnicastPingRequest(StreamInput in) throws IOException {
+            super(in);
+            id = in.readInt();
+            timeout = in.readTimeValue();
+            pingResponse = new PingResponse(in);
         }
 
         @Override
         public void readFrom(StreamInput in) throws IOException {
-            super.readFrom(in);
-            id = in.readInt();
-            timeout = new TimeValue(in);
-            pingResponse = readPingResponse(in);
+            throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
         }
 
         @Override
         public void writeTo(StreamOutput out) throws IOException {
             super.writeTo(out);
             out.writeInt(id);
-            timeout.writeTo(out);
+            out.writeTimeValue(timeout);
             pingResponse.writeTo(out);
         }
     }
@@ -660,21 +652,26 @@ public class UnicastZenPing extends AbstractComponent implements ZenPing {
 
     static class UnicastPingResponse extends TransportResponse {
 
-        int id;
+        final int id;
 
-        PingResponse[] pingResponses;
+        final PingResponse[] pingResponses;
 
-        UnicastPingResponse() {
+        UnicastPingResponse(int id, PingResponse[] pingResponses) {
+            this.id = id;
+            this.pingResponses = pingResponses;
+        }
+
+        UnicastPingResponse(StreamInput in) throws IOException {
+            id = in.readInt();
+            pingResponses = new PingResponse[in.readVInt()];
+            for (int i = 0; i < pingResponses.length; i++) {
+                pingResponses[i] = new PingResponse(in);
+            }
         }
 
         @Override
         public void readFrom(StreamInput in) throws IOException {
-            super.readFrom(in);
-            id = in.readInt();
-            pingResponses = new PingResponse[in.readVInt()];
-            for (int i = 0; i < pingResponses.length; i++) {
-                pingResponses[i] = readPingResponse(in);
-            }
+            throw new UnsupportedOperationException("usage of Streamable is to be replaced by Writeable");
         }
 
         @Override

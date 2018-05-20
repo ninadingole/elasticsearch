@@ -37,12 +37,12 @@ import static org.elasticsearch.cluster.routing.allocation.decider.Decision.YES;
  * the cluster. It exposes two settings via the cluster update API that allow
  * changes in real-time:
  * <ul>
- * <li><tt>cluster.routing.allocation.node_initial_primaries_recoveries</tt> -
+ * <li>{@code cluster.routing.allocation.node_initial_primaries_recoveries} -
  * restricts the number of initial primary shard recovery operations on a single
- * node. The default is <tt>4</tt></li>
- * <li><tt>cluster.routing.allocation.node_concurrent_recoveries</tt> -
+ * node. The default is {@code 4}</li>
+ * <li>{@code cluster.routing.allocation.node_concurrent_recoveries} -
  * restricts the number of total concurrent shards initializing on a single node. The
- * default is <tt>2</tt></li>
+ * default is {@code 2}</li>
  * </ul>
  * <p>
  * If one of the above thresholds is exceeded per node this allocation decider
@@ -156,7 +156,7 @@ public class ThrottlingAllocationDecider extends AllocationDecider {
                     return allocation.decision(THROTTLE, NAME,
                         "reached the limit of outgoing shard recoveries [%d] on the node [%s] which holds the primary, " +
                         "cluster setting [%s=%d] (can also be set via [%s])",
-                        primaryNodeOutRecoveries, node.nodeId(),
+                        primaryNodeOutRecoveries, primaryShard.currentNodeId(),
                         CLUSTER_ROUTING_ALLOCATION_NODE_CONCURRENT_OUTGOING_RECOVERIES_SETTING.getKey(),
                         concurrentOutgoingRecoveries,
                         CLUSTER_ROUTING_ALLOCATION_NODE_CONCURRENT_RECOVERIES_SETTING.getKey());

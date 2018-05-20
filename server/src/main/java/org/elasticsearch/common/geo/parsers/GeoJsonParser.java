@@ -18,9 +18,10 @@
  */
 package org.elasticsearch.common.geo.parsers;
 
-import com.vividsolutions.jts.geom.Coordinate;
+import org.locationtech.jts.geom.Coordinate;
 import org.elasticsearch.ElasticsearchParseException;
 import org.elasticsearch.common.Explicit;
+import org.elasticsearch.common.geo.GeoPoint;
 import org.elasticsearch.common.geo.GeoShapeType;
 import org.elasticsearch.common.geo.builders.CircleBuilder;
 import org.elasticsearch.common.geo.builders.GeometryCollectionBuilder;
@@ -49,6 +50,7 @@ abstract class GeoJsonParser {
         ShapeBuilder.Orientation requestedOrientation =
             (shapeMapper == null) ? ShapeBuilder.Orientation.RIGHT : shapeMapper.fieldType().orientation();
         Explicit<Boolean> coerce = (shapeMapper == null) ? GeoShapeFieldMapper.Defaults.COERCE : shapeMapper.coerce();
+        Explicit<Boolean> ignoreZValue = (shapeMapper == null) ? GeoShapeFieldMapper.Defaults.IGNORE_Z_VALUE : shapeMapper.ignoreZValue();
 
         String malformedException = null;
 
@@ -57,7 +59,7 @@ abstract class GeoJsonParser {
             if (token == XContentParser.Token.FIELD_NAME) {
                 String fieldName = parser.currentName();
 
-                if (ShapeParser.FIELD_TYPE.match(fieldName)) {
+                if (ShapeParser.FIELD_TYPE.match(fieldName, parser.getDeprecationHandler())) {
                     parser.nextToken();
                     final GeoShapeType type = GeoShapeType.forName(parser.text());
                     if (shapeType != null && shapeType.equals(type) == false) {
@@ -66,10 +68,15 @@ abstract class GeoJsonParser {
                     } else {
                         shapeType = type;
                     }
-                } else if (ShapeParser.FIELD_COORDINATES.match(fieldName)) {
+                } else if (ShapeParser.FIELD_COORDINATES.match(fieldName, parser.getDeprecationHandler())) {
                     parser.nextToken();
-                    coordinateNode = parseCoordinates(parser);
-                } else if (ShapeParser.FIELD_GEOMETRIES.match(fieldName)) {
+                    CoordinateNode tempNode = parseCoordinates(parser, ignoreZValue.value());
+                    if (coordinateNode != null && tempNode.numDimensions() != coordinateNode.numDimensions()) {
+                        throw new ElasticsearchParseException("Exception parsing coordinates: " +
+                            "number of dimensions do not match");
+                    }
+                    coordinateNode = tempNode;
+                } else if (ShapeParser.FIELD_GEOMETRIES.match(fieldName, parser.getDeprecationHandler())) {
                     if (shapeType == null) {
                         shapeType = GeoShapeType.GEOMETRYCOLLECTION;
                     } else if (shapeType.equals(GeoShapeType.GEOMETRYCOLLECTION) == false) {
@@ -78,7 +85,7 @@ abstract class GeoJsonParser {
                     }
                     parser.nextToken();
                     geometryCollections = parseGeometries(parser, shapeMapper);
-                } else if (CircleBuilder.FIELD_RADIUS.match(fieldName)) {
+                } else if (CircleBuilder.FIELD_RADIUS.match(fieldName, parser.getDeprecationHandler())) {
                     if (shapeType == null) {
                         shapeType = GeoShapeType.CIRCLE;
                     } else if (shapeType != null && shapeType.equals(GeoShapeType.CIRCLE) == false) {
@@ -87,7 +94,7 @@ abstract class GeoJsonParser {
                     }
                     parser.nextToken();
                     radius = DistanceUnit.Distance.parseDistance(parser.text());
-                } else if (ShapeParser.FIELD_ORIENTATION.match(fieldName)) {
+                } else if (ShapeParser.FIELD_ORIENTATION.match(fieldName, parser.getDeprecationHandler())) {
                     if (shapeType != null
                         && (shapeType.equals(GeoShapeType.POLYGON) || shapeType.equals(GeoShapeType.MULTIPOLYGON)) == false) {
                         malformedException = "cannot have [" + ShapeParser.FIELD_ORIENTATION + "] with type set to [" + shapeType + "]";
@@ -136,36 +143,46 @@ abstract class GeoJsonParser {
      *             Thrown if an error occurs while reading from the
      *             XContentParser
      */
-    private static CoordinateNode parseCoordinates(XContentParser parser) throws IOException {
+    private static CoordinateNode parseCoordinates(XContentParser parser, boolean ignoreZValue) throws IOException {
         XContentParser.Token token = parser.nextToken();
         // Base cases
         if (token != XContentParser.Token.START_ARRAY &&
             token != XContentParser.Token.END_ARRAY &&
             token != XContentParser.Token.VALUE_NULL) {
-            return new CoordinateNode(parseCoordinate(parser));
+            return new CoordinateNode(parseCoordinate(parser, ignoreZValue));
         } else if (token == XContentParser.Token.VALUE_NULL) {
             throw new IllegalArgumentException("coordinates cannot contain NULL values)");
         }
 
         List<CoordinateNode> nodes = new ArrayList<>();
         while (token != XContentParser.Token.END_ARRAY) {
-            nodes.add(parseCoordinates(parser));
+            CoordinateNode node = parseCoordinates(parser, ignoreZValue);
+            if (nodes.isEmpty() == false && nodes.get(0).numDimensions() != node.numDimensions()) {
+                throw new ElasticsearchParseException("Exception parsing coordinates: number of dimensions do not match");
+            }
+            nodes.add(node);
             token = parser.nextToken();
         }
 
         return new CoordinateNode(nodes);
     }
 
-    private static Coordinate parseCoordinate(XContentParser parser) throws IOException {
+    private static Coordinate parseCoordinate(XContentParser parser, boolean ignoreZValue) throws IOException {
         double lon = parser.doubleValue();
         parser.nextToken();
         double lat = parser.doubleValue();
         XContentParser.Token token = parser.nextToken();
-        while (token == XContentParser.Token.VALUE_NUMBER) {
-            token = parser.nextToken();
+        // alt (for storing purposes only - future use includes 3d shapes)
+        double alt = Double.NaN;
+        if (token == XContentParser.Token.VALUE_NUMBER) {
+            alt = GeoPoint.assertZValue(ignoreZValue, parser.doubleValue());
+            parser.nextToken();
         }
-        // todo support z/alt
-        return new Coordinate(lon, lat);
+        // do not support > 3 dimensions
+        if (parser.currentToken() == XContentParser.Token.VALUE_NUMBER) {
+            throw new ElasticsearchParseException("geo coordinates greater than 3 dimensions are not supported");
+        }
+        return new Coordinate(lon, lat, alt);
     }
 
     /**

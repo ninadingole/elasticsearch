@@ -28,6 +28,7 @@ import org.elasticsearch.common.io.stream.StreamInput;
 import org.elasticsearch.common.io.stream.StreamOutput;
 import org.elasticsearch.common.lucene.search.Queries;
 import org.elasticsearch.common.unit.Fuzziness;
+import org.elasticsearch.common.xcontent.LoggingDeprecationHandler;
 import org.elasticsearch.common.xcontent.XContentBuilder;
 import org.elasticsearch.common.xcontent.XContentParser;
 import org.elasticsearch.index.query.support.QueryParsers;
@@ -170,7 +171,7 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
         return this.value;
     }
 
-    /** Sets the operator to use when using a boolean query. Defaults to <tt>OR</tt>. */
+    /** Sets the operator to use when using a boolean query. Defaults to {@code OR}. */
     public MatchQueryBuilder operator(Operator operator) {
         if (operator == null) {
             throw new IllegalArgumentException("[" + NAME + "] requires operator to be non-null");
@@ -193,7 +194,7 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
         return this;
     }
 
-    /** Get the analyzer to use, if previously set, otherwise <tt>null</tt> */
+    /** Get the analyzer to use, if previously set, otherwise {@code null} */
     public String analyzer() {
         return this.analyzer;
     }
@@ -257,7 +258,7 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
         return this;
     }
 
-    /** Gets the optional cutoff value, can be <tt>null</tt> if not set previously */
+    /** Gets the optional cutoff value, can be {@code null} if not set previously */
     public Float cutoffFrequency() {
         return this.cutoffFrequency;
     }
@@ -356,7 +357,7 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
 
     /**
      * Whether phrase queries should be automatically generated for multi terms synonyms.
-     * Defaults to <tt>true</tt>.
+     * Defaults to {@code true}.
      */
     public boolean autoGenerateSynonymsPhraseQuery() {
         return autoGenerateSynonymsPhraseQuery;
@@ -412,7 +413,7 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
         matchQuery.setFuzzyPrefixLength(prefixLength);
         matchQuery.setMaxExpansions(maxExpansions);
         matchQuery.setTranspositions(fuzzyTranspositions);
-        matchQuery.setFuzzyRewriteMethod(QueryParsers.parseRewriteMethod(fuzzyRewrite, null));
+        matchQuery.setFuzzyRewriteMethod(QueryParsers.parseRewriteMethod(fuzzyRewrite, null, LoggingDeprecationHandler.INSTANCE));
         matchQuery.setLenient(lenient);
         matchQuery.setCommonTermsCutoff(cutoffFrequency);
         matchQuery.setZeroTermsQuery(zeroTermsQuery);
@@ -481,43 +482,43 @@ public class MatchQueryBuilder extends AbstractQueryBuilder<MatchQueryBuilder> {
                     if (token == XContentParser.Token.FIELD_NAME) {
                         currentFieldName = parser.currentName();
                     } else if (token.isValue()) {
-                        if (QUERY_FIELD.match(currentFieldName)) {
+                        if (QUERY_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             value = parser.objectText();
-                        } else if (ANALYZER_FIELD.match(currentFieldName)) {
+                        } else if (ANALYZER_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             analyzer = parser.text();
-                        } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName)) {
+                        } else if (AbstractQueryBuilder.BOOST_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             boost = parser.floatValue();
-                        } else if (Fuzziness.FIELD.match(currentFieldName)) {
+                        } else if (Fuzziness.FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             fuzziness = Fuzziness.parse(parser);
-                        } else if (PREFIX_LENGTH_FIELD.match(currentFieldName)) {
+                        } else if (PREFIX_LENGTH_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             prefixLength = parser.intValue();
-                        } else if (MAX_EXPANSIONS_FIELD.match(currentFieldName)) {
+                        } else if (MAX_EXPANSIONS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             maxExpansion = parser.intValue();
-                        } else if (OPERATOR_FIELD.match(currentFieldName)) {
+                        } else if (OPERATOR_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             operator = Operator.fromString(parser.text());
-                        } else if (MINIMUM_SHOULD_MATCH_FIELD.match(currentFieldName)) {
+                        } else if (MINIMUM_SHOULD_MATCH_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             minimumShouldMatch = parser.textOrNull();
-                        } else if (FUZZY_REWRITE_FIELD.match(currentFieldName)) {
+                        } else if (FUZZY_REWRITE_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             fuzzyRewrite = parser.textOrNull();
-                        } else if (FUZZY_TRANSPOSITIONS_FIELD.match(currentFieldName)) {
+                        } else if (FUZZY_TRANSPOSITIONS_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             fuzzyTranspositions = parser.booleanValue();
-                        } else if (LENIENT_FIELD.match(currentFieldName)) {
+                        } else if (LENIENT_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             lenient = parser.booleanValue();
-                        } else if (CUTOFF_FREQUENCY_FIELD.match(currentFieldName)) {
+                        } else if (CUTOFF_FREQUENCY_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             cutOffFrequency = parser.floatValue();
-                        } else if (ZERO_TERMS_QUERY_FIELD.match(currentFieldName)) {
-                            String zeroTermsDocs = parser.text();
-                            if ("none".equalsIgnoreCase(zeroTermsDocs)) {
+                        } else if (ZERO_TERMS_QUERY_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
+                            String zeroTermsValue = parser.text();
+                            if ("none".equalsIgnoreCase(zeroTermsValue)) {
                                 zeroTermsQuery = MatchQuery.ZeroTermsQuery.NONE;
-                            } else if ("all".equalsIgnoreCase(zeroTermsDocs)) {
+                            } else if ("all".equalsIgnoreCase(zeroTermsValue)) {
                                 zeroTermsQuery = MatchQuery.ZeroTermsQuery.ALL;
                             } else {
                                 throw new ParsingException(parser.getTokenLocation(),
-                                        "Unsupported zero_terms_docs value [" + zeroTermsDocs + "]");
+                                        "Unsupported zero_terms_query value [" + zeroTermsValue + "]");
                             }
-                        } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName)) {
+                        } else if (AbstractQueryBuilder.NAME_FIELD.match(currentFieldName, parser.getDeprecationHandler())) {
                             queryName = parser.text();
-                        } else if (GENERATE_SYNONYMS_PHRASE_QUERY.match(currentFieldName)) {
+                        } else if (GENERATE_SYNONYMS_PHRASE_QUERY.match(currentFieldName, parser.getDeprecationHandler())) {
                             autoGenerateSynonymsPhraseQuery = parser.booleanValue();
                         } else {
                             throw new ParsingException(parser.getTokenLocation(),

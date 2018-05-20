@@ -29,22 +29,23 @@ import org.apache.lucene.store.IOContext;
 import org.apache.lucene.store.IndexInput;
 import org.apache.lucene.store.RateLimiter;
 import org.apache.lucene.util.ArrayUtil;
-import org.apache.lucene.util.IOUtils;
 import org.elasticsearch.ExceptionsHelper;
 import org.elasticsearch.Version;
-import org.elasticsearch.action.support.PlainActionFuture;
+import org.elasticsearch.action.ActionListener;
 import org.elasticsearch.cluster.routing.IndexShardRoutingTable;
 import org.elasticsearch.cluster.routing.ShardRouting;
 import org.elasticsearch.common.Nullable;
 import org.elasticsearch.common.StopWatch;
 import org.elasticsearch.common.bytes.BytesArray;
-import org.elasticsearch.common.io.Streams;
 import org.elasticsearch.common.lease.Releasable;
-import org.elasticsearch.common.logging.ServerLoggers;
+import org.elasticsearch.common.logging.Loggers;
 import org.elasticsearch.common.lucene.store.InputStreamIndexInput;
 import org.elasticsearch.common.settings.Settings;
 import org.elasticsearch.common.unit.ByteSizeValue;
 import org.elasticsearch.common.util.CancellableThreads;
+import org.elasticsearch.common.util.concurrent.FutureUtils;
+import org.elasticsearch.core.internal.io.IOUtils;
+import org.elasticsearch.core.internal.io.Streams;
 import org.elasticsearch.index.engine.Engine;
 import org.elasticsearch.index.engine.RecoveryEngineException;
 import org.elasticsearch.index.seqno.LocalCheckpointTracker;
@@ -67,6 +68,7 @@ import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Locale;
+import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.function.Function;
 import java.util.function.Supplier;
@@ -120,7 +122,7 @@ public class RecoverySourceHandler {
         this.recoveryTarget = recoveryTarget;
         this.request = request;
         this.shardId = this.request.shardId().id();
-        this.logger = ServerLoggers.getLogger(getClass(), nodeSettings, request.shardId(), "recover to " + request.targetNode().getName());
+        this.logger = Loggers.getLogger(getClass(), nodeSettings, request.shardId(), "recover to " + request.targetNode().getName());
         this.chunkSizeInBytes = fileChunkSizeInBytes;
         this.response = new RecoveryResponse();
     }
@@ -142,12 +144,9 @@ public class RecoverySourceHandler {
                 throw new DelayRecoveryException("source node does not have the shard listed in its state as allocated on the node");
             }
             assert targetShardRouting.initializing() : "expected recovery target to be initializing but was " + targetShardRouting;
-        });
+        }, shardId + " validating recovery target ["+ request.targetAllocationId() + "] registered ", shard, cancellableThreads, logger);
 
         try (Closeable ignored = shard.acquireTranslogRetentionLock()) {
-
-            final Translog translog = shard.getTranslog();
-
             final long startingSeqNo;
             final long requiredSeqNoRangeStart;
             final boolean isSequenceNumberBasedRecovery = request.startingSeqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO &&
@@ -159,7 +158,7 @@ public class RecoverySourceHandler {
             } else {
                 final Engine.IndexCommitRef phase1Snapshot;
                 try {
-                    phase1Snapshot = shard.acquireIndexCommit(true, false);
+                    phase1Snapshot = shard.acquireSafeIndexCommit();
                 } catch (final Exception e) {
                     throw new RecoveryEngineException(shard.shardId(), 1, "snapshot failed", e);
                 }
@@ -170,7 +169,7 @@ public class RecoverySourceHandler {
                 requiredSeqNoRangeStart =
                     Long.parseLong(phase1Snapshot.getIndexCommit().getUserData().get(SequenceNumbers.LOCAL_CHECKPOINT_KEY)) + 1;
                 try {
-                    phase1(phase1Snapshot.getIndexCommit(), translog::totalOperations);
+                    phase1(phase1Snapshot.getIndexCommit(), () -> shard.estimateTranslogOperationsFromMinSeq(startingSeqNo));
                 } catch (final Exception e) {
                     throw new RecoveryEngineException(shard.shardId(), 1, "phase1 failed", e);
                 } finally {
@@ -185,14 +184,21 @@ public class RecoverySourceHandler {
             assert requiredSeqNoRangeStart >= startingSeqNo : "requiredSeqNoRangeStart [" + requiredSeqNoRangeStart + "] is lower than ["
                 + startingSeqNo + "]";
 
-            runUnderPrimaryPermit(() -> shard.initiateTracking(request.targetAllocationId()));
-
             try {
                 // For a sequence based recovery, the target can keep its local translog
-                prepareTargetForTranslog(isSequenceNumberBasedRecovery == false, translog.estimateTotalOperationsFromMinSeq(startingSeqNo));
+                prepareTargetForTranslog(isSequenceNumberBasedRecovery == false, shard.estimateTranslogOperationsFromMinSeq(startingSeqNo));
             } catch (final Exception e) {
                 throw new RecoveryEngineException(shard.shardId(), 1, "prepare target for translog failed", e);
             }
+
+            /*
+             * add shard to replication group (shard will receive replication requests from this point on) now that engine is open.
+             * This means that any document indexed into the primary after this will be replicated to this replica as well
+             * make sure to do this before sampling the max sequence number in the next step, to ensure that we send
+             * all documents up to maxSeqNo in phase2.
+             */
+            runUnderPrimaryPermit(() -> shard.initiateTracking(request.targetAllocationId()),
+                shardId + " initiating tracking of " + request.targetAllocationId(), shard, cancellableThreads, logger);
 
             final long endingSeqNo = shard.seqNoStats().getMaxSeqNo();
             /*
@@ -203,9 +209,9 @@ public class RecoverySourceHandler {
 
             logger.trace("all operations up to [{}] completed, which will be used as an ending sequence number", endingSeqNo);
 
-            logger.trace("snapshot translog for recovery; current size is [{}]", translog.estimateTotalOperationsFromMinSeq(startingSeqNo));
+            logger.trace("snapshot translog for recovery; current size is [{}]", shard.estimateTranslogOperationsFromMinSeq(startingSeqNo));
             final long targetLocalCheckpoint;
-            try(Translog.Snapshot snapshot = translog.newSnapshotFromMinSeqNo(startingSeqNo)) {
+            try(Translog.Snapshot snapshot = shard.newTranslogSnapshotFromMinSeqNo(startingSeqNo)) {
                 targetLocalCheckpoint = phase2(startingSeqNo, requiredSeqNoRangeStart, endingSeqNo, snapshot);
             } catch (Exception e) {
                 throw new RecoveryEngineException(shard.shardId(), 2, "phase2 failed", e);
@@ -223,17 +229,41 @@ public class RecoverySourceHandler {
         return targetHistoryUUID != null && targetHistoryUUID.equals(shard.getHistoryUUID());
     }
 
-    private void runUnderPrimaryPermit(CancellableThreads.Interruptable runnable) {
+    static void runUnderPrimaryPermit(CancellableThreads.Interruptable runnable, String reason,
+                                      IndexShard primary, CancellableThreads cancellableThreads, Logger logger) {
         cancellableThreads.execute(() -> {
-            final PlainActionFuture<Releasable> onAcquired = new PlainActionFuture<>();
-            shard.acquirePrimaryOperationPermit(onAcquired, ThreadPool.Names.SAME);
-            try (Releasable ignored = onAcquired.actionGet()) {
+            CompletableFuture<Releasable> permit = new CompletableFuture<>();
+            final ActionListener<Releasable> onAcquired = new ActionListener<Releasable>() {
+                @Override
+                public void onResponse(Releasable releasable) {
+                    if (permit.complete(releasable) == false) {
+                        releasable.close();
+                    }
+                }
+
+                @Override
+                public void onFailure(Exception e) {
+                    permit.completeExceptionally(e);
+                }
+            };
+            primary.acquirePrimaryOperationPermit(onAcquired, ThreadPool.Names.SAME, reason);
+            try (Releasable ignored = FutureUtils.get(permit)) {
                 // check that the IndexShard still has the primary authority. This needs to be checked under operation permit to prevent
-                // races, as IndexShard will change to RELOCATED only when it holds all operation permits, see IndexShard.relocated()
-                if (shard.state() == IndexShardState.RELOCATED) {
-                    throw new IndexShardRelocatedException(shard.shardId());
+                // races, as IndexShard will switch its authority only when it holds all operation permits, see IndexShard.relocated()
+                if (primary.isPrimaryMode() == false) {
+                    throw new IndexShardRelocatedException(primary.shardId());
                 }
                 runnable.run();
+            } finally {
+                // just in case we got an exception (likely interrupted) while waiting for the get
+                permit.whenComplete((r, e) -> {
+                    if (r != null) {
+                        r.close();
+                    }
+                    if (e != null) {
+                        logger.trace("suppressing exception on completion (it was already bubbled up or the operation was aborted)", e);
+                    }
+                });
             }
         });
     }
@@ -254,7 +284,7 @@ public class RecoverySourceHandler {
         // the start recovery request is initialized with the starting sequence number set to the target shard's local checkpoint plus one
         if (startingSeqNo - 1 <= localCheckpoint) {
             final LocalCheckpointTracker tracker = new LocalCheckpointTracker(startingSeqNo, startingSeqNo - 1);
-            try (Translog.Snapshot snapshot = shard.getTranslog().newSnapshotFromMinSeqNo(startingSeqNo)) {
+            try (Translog.Snapshot snapshot = shard.newTranslogSnapshotFromMinSeqNo(startingSeqNo)) {
                 Translog.Operation operation;
                 while ((operation = snapshot.next()) != null) {
                     if (operation.seqNo() != SequenceNumbers.UNASSIGNED_SEQ_NO) {
@@ -400,12 +430,9 @@ public class RecoverySourceHandler {
                         RemoteTransportException exception = new RemoteTransportException("File corruption occurred on recovery but " +
                                 "checksums are ok", null);
                         exception.addSuppressed(targetException);
-                        logger.warn(
-                            (org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage(
+                        logger.warn(() -> new ParameterizedMessage(
                                 "{} Remote file corruption during finalization of recovery on node {}. local checksum OK",
-                                shard.shardId(),
-                                request.targetNode()),
-                            corruptIndexException);
+                                shard.shardId(), request.targetNode()), corruptIndexException);
                         throw exception;
                     } else {
                         throw targetException;
@@ -487,17 +514,19 @@ public class RecoverySourceHandler {
          * marking the shard as in-sync. If the relocation handoff holds all the permits then after the handoff completes and we acquire
          * the permit then the state of the shard will be relocated and this recovery will fail.
          */
-        runUnderPrimaryPermit(() -> shard.markAllocationIdAsInSync(request.targetAllocationId(), targetLocalCheckpoint));
+        runUnderPrimaryPermit(() -> shard.markAllocationIdAsInSync(request.targetAllocationId(), targetLocalCheckpoint),
+            shardId + " marking " + request.targetAllocationId() + " as in sync", shard, cancellableThreads, logger);
         final long globalCheckpoint = shard.getGlobalCheckpoint();
         cancellableThreads.executeIO(() -> recoveryTarget.finalizeRecovery(globalCheckpoint));
-        runUnderPrimaryPermit(() -> shard.updateGlobalCheckpointForShard(request.targetAllocationId(), globalCheckpoint));
+        runUnderPrimaryPermit(() -> shard.updateGlobalCheckpointForShard(request.targetAllocationId(), globalCheckpoint),
+            shardId + " updating " + request.targetAllocationId() + "'s global checkpoint", shard, cancellableThreads, logger);
 
         if (request.isPrimaryRelocation()) {
             logger.trace("performing relocation hand-off");
             // this acquires all IndexShard operation permits and will thus delay new recoveries until it is done
-            cancellableThreads.execute(() -> shard.relocated("to " + request.targetNode(), recoveryTarget::handoffPrimaryContext));
+            cancellableThreads.execute(() -> shard.relocated(recoveryTarget::handoffPrimaryContext));
             /*
-             * if the recovery process fails after setting the shard state to RELOCATED, both relocation source and
+             * if the recovery process fails after disabling primary mode on the source shard, both relocation source and
              * target are failed (see {@link IndexShard#updateRoutingEntry}).
              */
         }
@@ -672,13 +701,9 @@ public class RecoverySourceHandler {
                             RemoteTransportException exception = new RemoteTransportException("File corruption occurred on recovery but " +
                                     "checksums are ok", null);
                             exception.addSuppressed(e);
-                            logger.warn(
-                                (org.apache.logging.log4j.util.Supplier<?>) () -> new ParameterizedMessage(
+                            logger.warn(() -> new ParameterizedMessage(
                                     "{} Remote file corruption on node {}, recovering {}. local checksum OK",
-                                    shardId,
-                                    request.targetNode(),
-                                    md),
-                                corruptIndexException);
+                                    shardId, request.targetNode(), md), corruptIndexException);
                             throw exception;
                         }
                     } else {
